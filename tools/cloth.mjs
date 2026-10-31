@@ -37,6 +37,12 @@ export const CLAMP_ROW = envNum("CLAMP_ROW", 2); // rows from here down collide 
 // into it, and rain at 1.0 blew it flat.
 const WIND = envNum("WIND", 0.5), WIND_RAIN = 2.5, WIND_SNOW = 1.3, WIND_CALM = 0.15, AIR_MAX = 6;
 // Fluids: velocity kept per 60 Hz step and the share of gravity left after buoyancy.
+// Fire: the heat (0..1) takes HEAT_LIFT of the weight off the cape and makes it billow (sweep:
+// lift above 1 flips the cape over the head, flutter 4 opens 2 px seams; 1 and 2 lift the hem
+// about 6 px with 0.8 px seams); the
+// hem burns away up to BURN_ROWS rows, one row per 1/BURN_RATE s on fire, and grows back one
+// row per 1/REGROW_RATE s once out (hidden rows still simulate, only their cubes are hidden).
+const HEAT_LIFT = envNum("HEAT_LIFT", 1), HEAT_FLUTTER = envNum("HEAT_FLUTTER", 2), BURN_ROWS = 3, BURN_RATE = 0.5, REGROW_RATE = 0.1;
 const WATER_DRAG = envNum("WATER_DRAG", 0.8), WATER_G = envNum("WATER_G", -0.05), LAVA_DRAG = 0.6, LAVA_G = 0.05;
 
 const NP = (ROWS + 1) * (COLS + 1);
@@ -135,7 +141,9 @@ function env() {
         set("v.cwfh", `(t.ey+t.wy+0.9-v.cwby)*${num(PX)}`),
         set("v.cwfd", `t.lv?${LAVA_DRAG}:${WATER_DRAG}`), set("v.cwfg", `t.lv?${LAVA_G}:${WATER_G}`),
       ], set("v.cwfh", -1000000)),
-      set("v.cwsg", "v.cwtb+v.cwwe*1048576+math.floor(v.cwfh/4)*2097152"),
+      set("v.cwht", "math.clamp(v.cwht+(q.is_on_fire?0.1:-0.05),0,1)"),
+      set("v.cwbn", `math.clamp(v.cwbn+(q.is_on_fire?${num(BURN_RATE / 20)}:-${num(REGROW_RATE / 20)}),0,${BURN_ROWS})`),
+      set("v.cwsg", "v.cwtb+v.cwwe*1048576+(v.cwht>0)*2097152"),
     ]),
   ];
 }
@@ -173,7 +181,7 @@ function wind() {
     ["x", "z"].map(a => set("v.cwn" + a, `math.lerp(v.cwn${a},v.cwu${a},math.clamp(q.delta_time*2,0,1))`)),
     // In a fluid the air flutter gives way to a fixed slight sway standing in for currents
     // (buoyancy alone cannot tip a cape hanging straight down).
-    set("v.cwsp", `v.cwwe?1.5:math.min(math.sqrt(math.pow(v.cwvx-v.cwnx,2)+math.pow(v.cwvz-v.cwnz,2)),${AIR_MAX})`),
+    set("v.cwsp", `v.cwwe?1.5:math.min(math.sqrt(math.pow(v.cwvx-v.cwnx,2)+math.pow(v.cwvz-v.cwnz,2))+v.cwht*${HEAT_FLUTTER},${AIR_MAX})`),
   ];
 }
 
@@ -245,7 +253,7 @@ const legSig = ["t.rd+t.rnz", "t.ld+t.lnz"];
 // Blocks, fluids and wind are compared with their values at the last step.
 const wake = () => [...pinnedIds.flatMap(c => AX.map(a => `math.abs(${P(c, a)}-${AN(c, a)})`)),
   `math.abs(${legSig[0]}-v.cwrs)`, `math.abs(${legSig[1]}-v.cwls)`, "math.abs(v.cwsg-v.cwss)",
-  "math.abs(v.cwnx-v.cwsx)", "math.abs(v.cwnz-v.cwsz)"].join("+") + `>${num(WAKE_EPS)}||t.vn`;
+  "math.abs(v.cwnx-v.cwsx)", "math.abs(v.cwnz-v.cwsz)"].join("+") + `>${num(WAKE_EPS)}||t.vn||v.cwht>0`;
 
 function step() {
   return [
@@ -257,6 +265,7 @@ function step() {
     // Wind as a per-step displacement; fluid drag and the buoyancy-reduced gravity.
     set("t.wx", `v.cwnx*${num(PX)}*t.h`), set("t.wz", `v.cwnz*${num(PX)}*t.h`),
     set("t.fd", "math.pow(v.cwfd,t.h*60)"), set("t.gw", "v.cwfg*t.gh"),
+    set("t.gh", `t.gh*(1-${num(HEAT_LIFT)}*v.cwht)`),  // hot air rising takes weight off the cape
     // A wave running from the shoulders to the hem, nearly in phase across a row.
     free.map(({ i, r, c }) => set("t.fq" + key(i), `math.sin(t.tp-${r * 50 + c * 8})*${num(r / ROWS)}`)),
     set("t.j", 0),
@@ -474,7 +483,7 @@ export function geometry() {
     if (c === 0) uv.east = { uv: [11, vt], uv_size: [1, round(h)] };
     if (c === COLS - 1) uv.west = { uv: [0, vt], uv_size: [1, round(h)] };
     if (r === 0) uv.up = { uv: [round(6 - x0 + L), 0], uv_size: [round(-w), 1] };
-    if (r === ROWS - 1) uv.down = { uv: [round(16 - x0 + L), 0], uv_size: [round(-w), 1] };
+    uv.down = { uv: [round(16 - x0 + L), 0], uv_size: [round(-w), 1] };  // every row: a burnt hem shows a closed edge
     list.push({ name: n.outer, parent: "body", pivot }, { name: n.mid, parent: n.outer, pivot },
       { name: n.mesh, parent: n.mid, pivot, cubes: [{ origin: [round(x0 - L), round(y1 - H - B), 2], size: [round(w), round(h), 1], uv }] });
   });
@@ -484,12 +493,15 @@ export function geometry() {
     bones: list }] };
 }
 
+// Row r of the cloth is gone once the hem has burnt past it (variable.cwbn rows, unset = 0).
+export const burnShows = r => `(variable.cwbn ?? 0) < ${ROWS - r}`;
+
 // Same visibility rule as _sample, applied to every cube bone.
 export function renderController() {
   const show = "query.armor_texture_slot(1) != 5 && (!variable.is_first_person || variable.is_paperdoll) && !variable.map_face_icon && !query.is_spectator";
   return { format_version: "1.8.0", render_controllers: { "controller.render.player.cape": {
     rebuild_animation_matrices: true, geometry: "Geometry.cape", materials: [{ "*": "Material.cape" }], textures: ["Texture.cape"],
-    part_visibility: [Object.fromEntries(each((r, c) => [boneNames(r, c).mesh, show]))],
+    part_visibility: [Object.fromEntries(each((r, c) => [boneNames(r, c).mesh, r < ROWS - BURN_ROWS ? show : `${show} && ${burnShows(r)}`]))],
     is_hurt_color: { r: 0, g: 0, b: 0, a: 0 } } } };
 }
 export const sections = () => ({ origin: origin(), frame: frame(), reset: reset(), step: step(), cell: cell(1, 1) });

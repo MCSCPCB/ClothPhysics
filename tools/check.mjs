@@ -45,7 +45,7 @@ function query(s) {
     time_stamp: () => s.stamp ?? 0, is_in_water: () => +wet(...P), is_in_contact_with_water: () => +wet(P[0], P[1] - 0.1, P[2]),
     is_in_lava: () => 0, is_in_water_or_rain: () => +(wet(...P) || (!!w.rain && !roofed)),
     entity_biome_has_any_tags: (...tags) => +tags.some(t => (w.biome ?? []).includes(t)),
-    time_of_day: () => w.time ?? 0.25, cape_flap_amount: () => s.flap ?? 0,
+    time_of_day: () => w.time ?? 0.25, cape_flap_amount: () => s.flap ?? 0, is_on_fire: () => +!!s.fire,
     is_local_player: () => +!s.viewer, distance_from_camera: () => s.viewer?.dist ?? 50,
     rotation_to_camera: k => s.viewer?.rot[k] ?? 0,
     // Absolute block cells only (the relative query is eye-based for players and not mocked).
@@ -111,7 +111,7 @@ function run(opt) {
       leftleg: { t: { x: 1.9, y: 12, z: mo.sneak ? 4 : 0 }, r: { x: -swing, y: 0, z: 0 } },
     };
     Object.assign(s, { time: t, dt, alpha: t * 20 - nowTick, pos: tickCur, yaw: mo.yaw, bones: lagged ?? bones, ui: 0, stamp: stamp + nowTick,
-      viewer: opt.viewer?.(t, tickCur) });
+      viewer: opt.viewer?.(t, tickCur), fire: opt.fire?.(t) });
     prog(v, query(s), MATH);
     const cells = evalChannels(v, query(s));
     lagged = bones;
@@ -137,6 +137,7 @@ function run(opt) {
       m.deflect = (m.deflect ?? 0) + hem.reduce((n, d) => n + len(d), 0) / hem.length;
       m.hemUp = (m.hemUp ?? 0) + hem.reduce((n, d) => n + d[1], 0) / hem.length;
       m.wind = (m.wind ?? 0) + Math.hypot(v.cwnx, v.cwnz);
+      m.burnMax = Math.max(m.burnMax ?? 0, v.cwbn); m.burnEnd = v.cwbn;
       if (m.lastBase && Math.abs(v.cwby - m.lastBase) > 1e-9) m.resets = (m.resets ?? 0) + 1;
       m.lastBase = v.cwby;
       const hc = particle(v, ROWS, COLS >> 1, armorZ);
@@ -271,6 +272,10 @@ const envCases = [
     viewer: (t, p) => { const feet = [p[0] + 0.15, p[1], p[2] - 0.75], eye = [feet[0], feet[1] + 1.62, feet[2]];
       const d = eye.map((x, k) => x - [p[0], p[1] + 1.62, p[2]][k]), dist = Math.hypot(...d), h = Math.hypot(d[0], d[2]);
       return { feet, dist, rot: [-Math.atan2(d[1], h) / D, Math.atan2(-d[0], d[2]) / D] }; } })],
+  // Indoors (no wind): standing, then 8 s on fire, then 8 s out of it.
+  ["fire indoors", standCase(ROOM, { fire: t => t > 3 && t < 11, envWindow: [5, 11], seconds: 19 })],
+  ["sprint on fire", standCase(OPEN, { fire: t => t > 1, envWindow: [3, 8], scenario: t => ({ speed: t < 1 ? 0 : 5.6, yaw: 0, sneak: false, jump: 0, teleport: 0 }) })],
+  ["after the fire", standCase(ROOM, { fire: t => t > 3 && t < 11, envWindow: [14, 19], seconds: 19 })],
   ["run in water", standCase({ ...OPEN, water: 66, rain: true }, { surface: 66,
     scenario: t => ({ speed: t < 1 ? 0 : 2, yaw: 0, sneak: false, jump: 0, teleport: 0 }) })],
 ];
@@ -330,7 +335,7 @@ for (const [name, opt] of cases) {
   if (opt.scenario && !opt.env) check("max per-frame jump px", fmt(m.jumpPx), m.jumpPx < 3);
   if (opt.env) {
     const avg = k => (m[k] ?? 0) / (m.envN || 1);
-    env[name] = { resets: m.resets ?? 0, jerk: m.jerk ?? 0, inViewer: m.inViewer ?? 0, wet: avg("wet"), deflect: avg("deflect"), hemUp: avg("hemUp"), wind: avg("wind"), sleep: avg("envSleep"), pen: m.pen ?? 0 };
+    env[name] = { burnMax: m.burnMax ?? 0, burnEnd: m.burnEnd ?? 0, resets: m.resets ?? 0, jerk: m.jerk ?? 0, inViewer: m.inViewer ?? 0, wet: avg("wet"), deflect: avg("deflect"), hemUp: avg("hemUp"), wind: avg("wind"), sleep: avg("envSleep"), pen: m.pen ?? 0 };
     console.log(`  info hem offset px ${fmt(avg("deflect"))} (up ${fmt(avg("hemUp"))}), wind ${fmt(avg("wind"))} b/s, asleep ${(100 * avg("envSleep")).toFixed(0)}%, ` +
       `in blocks px: rows ${CLAMP_ROW}+ ${fmt(m.pen ?? 0)}, above ${fmt(m.penTop ?? 0)}`);
     console.log(`  info resets ${m.resets ?? 0}, hem jerk px ${fmt(m.jerk ?? 0)}, inside other player px ${fmt(m.inViewer ?? 0)}`);
@@ -356,6 +361,11 @@ check("fast fall: smooth hem (jerk px)", fmt(env["fast fall 144fps jitter"].jerk
 // Uneven frame times alone give about 1.3 px (the build before the 60 Hz accumulator: 1.36);
 // the first accumulator, with a fixed 1/60 s step, gave 3.9 px, the hopping seen in game.
 check("fly up: smooth hem (jerk px)", fmt(env["fly up 59fps jitter"].jerk), env["fly up 59fps jitter"].jerk < 1.5);
+check("fire: hem lifts and billows", `${fmt(env["fire indoors"].hemUp)} up, ${fmt(env["fire indoors"].deflect)} off`, env["fire indoors"].hemUp > 3 && env["fire indoors"].sleep === 0);
+check("sprint on fire: hem higher than without", `${fmt(env["sprint on fire"].hemUp)} > ${fmt(env["sprint along wall"].hemUp)}`, env["sprint on fire"].hemUp > env["sprint along wall"].hemUp);
+check("fire: hem burns 3 rows", fmt(env["fire indoors"].burnMax), Math.abs(env["fire indoors"].burnMax - 3) < 1e-6);
+check("after the fire: cape settles", `${fmt(env["after the fire"].deflect)} px, asleep ${fmt(env["after the fire"].sleep)}`, env["after the fire"].deflect < 1 && env["after the fire"].sleep > 0.5);
+check("after the fire: grows back", fmt(env["after the fire"].burnEnd), env["after the fire"].burnEnd < 2.3 && env["after the fire"].burnEnd > 2);
 check("cape kept out of the other player", fmt(env["other player behind"].inViewer), env["other player behind"].inViewer < 0.05);
 check("underwater hem floats up", `${fmt(env["underwater stand"].hemUp)} > ${fmt(env["roofed stand"].hemUp)}`, env["underwater stand"].hemUp > env["roofed stand"].hemUp + 1);
 }
