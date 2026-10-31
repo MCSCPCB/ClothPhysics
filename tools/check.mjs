@@ -1,7 +1,7 @@
 // Runs the generated Molang (printed as JS) against a scripted player and reports
 // seams, parallelogram fit, stretch, lift and UI isolation. It verifies our own math
 // and logic only; Bedrock's real transform conventions still need the in-game test.
-import { program, channels, initDefaults, pid, restX, restY, COLS, ROWS, W, H, ZMID } from "./cloth.mjs";
+import { program, channels, initDefaults, pid, restX, restY, COLS, ROWS, W, H, ZMID, OVERLAP } from "./cloth.mjs";
 import { toMolang, compileJs, jsReturn, MATH, strict } from "./molang.mjs";
 
 const D = Math.PI / 180, key = i => i.toString(36);
@@ -197,6 +197,8 @@ for (const [name, opt] of cases) {
   const p99 = k => [...m.series[k]].sort((a, b) => a - b)[Math.floor(m.series[k].length * 0.99)];
   check("link stretch p99/max", `${fmt(p99("stretch"))} / ${fmt(m.stretch)}`, p99("stretch") < 1.15);
   check("seam gap px p99/max", `${fmt(p99("seam"))} / ${fmt(m.seam)}`, p99("seam") < 1);
+  const open = m.series.seam.filter(x => x > 2 * OVERLAP).length / m.series.seam.length;
+  console.log(`  info frames with a crack wider than the ${2 * OVERLAP}px overlap: ${(open * 100).toFixed(2)}%`);
   check("corner fit px p99/max", `${fmt(p99("fit"))} / ${fmt(m.fit)}`, p99("fit") < 1);
   if (!opt.scenario) check("sprint lift deg", lift.toFixed(1), lift > 10 && lift < 85);
   if (!opt.scenario || opt.kickWindow) console.log(`  info hem kick px ${fmt(m.kick)}, leg clip px ${fmt(m.legClip)}`);

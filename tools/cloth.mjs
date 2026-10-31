@@ -265,22 +265,29 @@ export function bones() {
 // outer (south) face u = 6 - x and inner (north) face u = 17 + x across the cape (south u
 // runs toward -x, north toward +x), sample's local east strip (u 0) lands on our -x edge,
 // and the 1px top/bottom strips are the sample's turned by 180° (u and v both flipped).
+// Each cell reaches OVERLAP px past its interior edges into its neighbours, with the UVs
+// extended by the same amount, so the overlap shows the neighbour's own texels (invisible
+// when flat) and covers the cracks a bend or an imperfect parallelogram fit opens.
+// The cape's outer border is never extended. Pivots and the fit stay on the rest cell.
+export const OVERLAP = envNum("OVERLAP", 0.5);
 export function geometry() {
   const list = [{ name: "root", pivot: [0, 0, 0] }, { name: "waist", parent: "root", pivot: [0, 12, 0] },
     { name: "body", parent: "waist", pivot: [0, 24, 0] }];
   each((r, c) => {
-    const n = boneNames(r, c), x0 = restX(c), y1 = restY(r), v0 = round(1 + r * H);
+    const n = boneNames(r, c), x0 = restX(c), y1 = restY(r), v0 = 1 + r * H;
+    const L = c > 0 ? OVERLAP : 0, Rt = c < COLS - 1 ? OVERLAP : 0, T = r > 0 ? OVERLAP : 0, B = r < ROWS - 1 ? OVERLAP : 0;
+    const w = W + L + Rt, h = H + T + B, vt = round(v0 - T);
     const pivot = [round(x0 + W / 2), round(y1 - H / 2), ZMID];
     const uv = {
-      north: { uv: [round(17 + x0), v0], uv_size: [round(W), round(H)] },
-      south: { uv: [round(6 - x0 - W), v0], uv_size: [round(W), round(H)] },
+      north: { uv: [round(17 + x0 - L), vt], uv_size: [round(w), round(h)] },
+      south: { uv: [round(6 - x0 - W - Rt), vt], uv_size: [round(w), round(h)] },
     };
-    if (c === 0) uv.west = { uv: [0, v0], uv_size: [1, round(H)] };
-    if (c === COLS - 1) uv.east = { uv: [11, v0], uv_size: [1, round(H)] };
-    if (r === 0) uv.up = { uv: [round(6 - x0), 0], uv_size: [round(-W), 1] };
-    if (r === ROWS - 1) uv.down = { uv: [round(16 - x0), 0], uv_size: [round(-W), 1] };
+    if (c === 0) uv.west = { uv: [0, vt], uv_size: [1, round(h)] };
+    if (c === COLS - 1) uv.east = { uv: [11, vt], uv_size: [1, round(h)] };
+    if (r === 0) uv.up = { uv: [round(6 - x0 + L), 0], uv_size: [round(-w), 1] };
+    if (r === ROWS - 1) uv.down = { uv: [round(16 - x0 + L), 0], uv_size: [round(-w), 1] };
     list.push({ name: n.outer, parent: "body", pivot }, { name: n.mid, parent: n.outer, pivot },
-      { name: n.mesh, parent: n.mid, pivot, cubes: [{ origin: [round(x0), round(y1 - H), 2], size: [round(W), round(H), 1], uv }] });
+      { name: n.mesh, parent: n.mid, pivot, cubes: [{ origin: [round(x0 - L), round(y1 - H - B), 2], size: [round(w), round(h), 1], uv }] });
   });
   return { format_version: "1.12.0", "minecraft:geometry": [{
     description: { identifier: "geometry.cape", texture_width: 64, texture_height: 32,
