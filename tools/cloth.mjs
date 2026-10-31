@@ -263,13 +263,13 @@ export function bones() {
 
 // UVs reproduce _sample, whose cape bone is turned 180° about y; our cells are not, so:
 // outer (south) face u = 6 - x and inner (north) face u = 17 + x across the cape (south u
-// runs toward -x, north toward +x), sample's local east strip (u 0) lands on our -x edge,
-// and the 1px top/bottom strips are the sample's turned by 180° (u and v both flipped).
+// runs toward -x, north toward +x), and the 1px top/bottom strips are the sample's turned
+// by 180° (u and v both flipped). Side strips: see the east/west note below.
 // Each cell reaches OVERLAP px past its interior edges into its neighbours, with the UVs
 // extended by the same amount, so the overlap shows the neighbour's own texels (invisible
 // when flat) and covers the cracks a bend or an imperfect parallelogram fit opens.
 // The cape's outer border is never extended. Pivots and the fit stay on the rest cell.
-export const OVERLAP = envNum("OVERLAP", 0.5);
+export const OVERLAP = envNum("OVERLAP", 0.75);  // sweep: 0.5 left 3.4% cracked frames (leg swing), 0.6 none; 0.75 for margin
 export function geometry() {
   const list = [{ name: "root", pivot: [0, 0, 0] }, { name: "waist", parent: "root", pivot: [0, 12, 0] },
     { name: "body", parent: "waist", pivot: [0, 24, 0] }];
@@ -282,8 +282,11 @@ export function geometry() {
       north: { uv: [round(17 + x0 - L), vt], uv_size: [round(w), round(h)] },
       south: { uv: [round(6 - x0 - W - Rt), vt], uv_size: [round(w), round(h)] },
     };
-    if (c === 0) uv.west = { uv: [0, vt], uv_size: [1, round(h)] };
-    if (c === COLS - 1) uv.east = { uv: [11, vt], uv_size: [1, round(h)] };
+    // Bedrock names faces in mirrored x: "east" is the -x side, "west" the +x side (in game,
+    // a "west" face on the leftmost column was hidden inside the cape). _sample's turned cape
+    // puts its u 0 strip on our +x edge and the u 11 strip on our -x edge.
+    if (c === 0) uv.east = { uv: [11, vt], uv_size: [1, round(h)] };
+    if (c === COLS - 1) uv.west = { uv: [0, vt], uv_size: [1, round(h)] };
     if (r === 0) uv.up = { uv: [round(6 - x0 + L), 0], uv_size: [round(-w), 1] };
     if (r === ROWS - 1) uv.down = { uv: [round(16 - x0 + L), 0], uv_size: [round(-w), 1] };
     list.push({ name: n.outer, parent: "body", pivot }, { name: n.mid, parent: n.outer, pivot },
