@@ -58,7 +58,26 @@ export const jsReturn = expr => `return (${jsExpr(String(expr))});`;
 const D = Math.PI / 180;
 export const MATH = {
   sin: x => Math.sin(x * D), cos: x => Math.cos(x * D), asin: x => Math.asin(x) / D, acos: x => Math.acos(x) / D,
-  atan2: (y, x) => Math.atan2(y, x) / D, sqrt: Math.sqrt, abs: Math.abs, min: Math.min, max: Math.max,
+  atan2: (y, x) => Math.atan2(y, x) / D, sqrt: Math.sqrt, abs: Math.abs, min: (a, b) => Math.min(a, b), max: (a, b) => Math.max(a, b),
   floor: Math.floor, ceil: Math.ceil, round: Math.round, exp: Math.exp, pow: Math.pow,
   clamp: (x, a, b) => Math.min(b, Math.max(a, x)), lerp: (a, b, t) => a + (b - a) * t, mod: (a, b) => a % b,
 };
+
+// Molang's argument counts. JS accepts extra arguments silently (math.min(a,b,c) ran in the
+// harness but broke the whole expression in game), so every generated text is checked.
+const ARITY = { abs: 1, acos: 1, asin: 1, atan: 1, atan2: 2, ceil: 1, clamp: 3, cos: 1, exp: 1, floor: 1,
+  lerp: 3, ln: 1, max: 2, min: 2, mod: 2, pow: 2, round: 1, sin: 1, sqrt: 1, trunc: 1 };
+export function checkMolang(text, where) {
+  const re = /math\.([a-z_]+)\(/g;
+  for (let m; (m = re.exec(text));) {
+    if (!(m[1] in ARITY)) throw new Error(`${where}: unknown function math.${m[1]}`);
+    let depth = 0, args = 1, i = m.index + m[0].length;
+    for (; i < text.length; i++) {
+      const ch = text[i];
+      if (ch === "(") depth++; else if (ch === ")") { if (depth-- === 0) break; } else if (ch === "," && depth === 0) args++;
+    }
+    if (args !== ARITY[m[1]]) throw new Error(`${where}: math.${m[1]} takes ${ARITY[m[1]]} arguments, got ${args}: ${text.slice(m.index, i + 1).slice(0, 100)}`);
+  }
+  if (/\d[eE][+-]?\d/.test(text.replace(/[a-z_]+\.[a-z0-9_]+/g, ""))) throw new Error(`${where}: exponent number literal`);
+  return text;
+}

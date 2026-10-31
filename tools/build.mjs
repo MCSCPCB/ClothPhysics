@@ -4,7 +4,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { program, bones, geometry, renderController } from "./cloth.mjs";
-import { toMolang } from "./molang.mjs";
+import { toMolang, checkMolang } from "./molang.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const src = path.join(root, "src"), LIMIT = 61500;
@@ -14,7 +14,9 @@ const write = (rel, data) => {
   fs.writeFileSync(file, typeof data === "string" ? data : JSON.stringify(data, null, 1) + "\n");
 };
 
-const update = toMolang(program()) + "return 0;";
+// Every expression is checked for Molang argument counts before anything is written.
+const update = checkMolang(toMolang(program()) + "return 0;", "anim_time_update");
+for (const [b, ch] of Object.entries(bones())) for (const [c, vals] of Object.entries(ch)) vals.forEach((x, i) => checkMolang(String(x), `${b}.${c}[${i}]`));
 if (update.length > LIMIT) throw new Error(`anim_time_update is ${update.length} chars, over ${LIMIT}`);
 const channelMax = Math.max(...Object.values(bones()).flatMap(b => Object.values(b).flat()).map(e => String(e).length));
 if (channelMax > LIMIT) throw new Error(`a bone channel is ${channelMax} chars, over ${LIMIT}`);
