@@ -1,0 +1,17 @@
+{
+ "format_version": 3,
+ "header": {
+  "name": "ClothPhysics",
+  "description": "物理披风：粒子网格布料，玩家身体碰撞。",
+  "uuid": "76c95ac5-02c7-4bca-bdce-dc6087d08e68",
+  "version": "0.2.0",
+  "min_engine_version": "1.26.50"
+ },
+ "modules": [
+  {
+   "type": "resources",
+   "uuid": "e877eb6c-18c5-4891-b9cc-56b4279ad579",
+   "version": "0.2.0"
+  }
+ ]
+}
