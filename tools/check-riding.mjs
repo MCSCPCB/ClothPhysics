@@ -4,7 +4,7 @@ import { upperBone } from './test-player.mjs';
 import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
 process.env.WIND = '0';
-const { program, channels, COLS, ROWS, pid } = await import('./cloth.mjs');
+const { program, channels, COLS, ROWS, pid } = await import(process.env.CLOTH_PROFILE ? `./cloth.mjs?profile=${process.env.CLOTH_PROFILE}` : './cloth.mjs');
 const { compileJs, jsReturn, MATH, strict } = await import('./molang.mjs');
 const current = compileJs(program());
 const baseline = process.env.CLOTH_BASELINE

@@ -49,8 +49,8 @@ export function toMolang(nodes) {
 // The readable generator uses descriptive persistent state names. Allocate short,
 // pack-local names at export only; every animation and visibility expression shares
 // one map. Vanilla player variables and query/struct member names stay untouched.
-export function compactNames(texts) {
-  const all = texts.join(''), externalNames = [...new Set([...all.matchAll(/\bv\.\w+/g)].map(x => x[0]).filter(n => !n.startsWith('v.c')))];
+export function compactNames(texts, { externalNames: extraExternal = [] } = {}) {
+  const all = texts.join(''), externalNames = [...new Set([...extraExternal, ...[...all.matchAll(/\bv\.\w+/g)].map(x => x[0]).filter(n => !n.startsWith('v.c'))])];
   const expression = minifier({ frequencyText: texts[0].repeat(200) + texts.slice(1).join(''), reservedNames, externalNames });
   // Stable temporaries for source-tree comparisons. Actual output uses expression(),
   // whose temporary map belongs to one complete expression, never to JSON or a statement.

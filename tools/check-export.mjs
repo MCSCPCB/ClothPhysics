@@ -1,7 +1,8 @@
 // Execute the final compacted Molang, not just the generator's statement tree.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { program, channels, bones, renderController, wetUpdate, wetTint } from './cloth.mjs';
+const cloth = await import(process.env.CLOTH_PROFILE ? `./cloth.mjs?profile=${process.env.CLOTH_PROFILE}` : './cloth.mjs');
+const { program, channels, bones, renderController, wetUpdate, wetTint, profile } = cloth;
 import { compileJs, jsReturn, MATH, strict, toMolang, compactNames, set, when, loop, checkMolang } from './molang.mjs';
 import { playerFixture } from './test-world.mjs';
 import { parseExpression } from './export/parse.mjs';
@@ -21,7 +22,7 @@ function readScript(text) {
  const nodes=sequence();assert.equal(at,text.length);return nodes;
 }
 const raw=toMolang(program())+'return math.min(q.anim_time+q.delta_time,.5);',rawBones=bones(),render=renderController();
-const packed=compactNames([raw,JSON.stringify(rawBones),JSON.stringify(render)]);
+const packed=compactNames([raw,JSON.stringify(rawBones),JSON.stringify(render)],profile);
 // Molang allows a--b as subtraction of a negative value. JavaScript reads -- as
 // a decrement token, so translate the parsed tree with explicit parentheses.
 const jsSafe=n=>n.kind==='value'?typeof n.value==='string'?"'"+n.value+"'":String(n.value):n.kind==='read'?n.path.join('.'):
@@ -37,9 +38,15 @@ function validate(nodes){for(const n of nodes){for(const expr of n.kind==='set'?
 validate(program());chans.forEach(c=>validate(c.nodes));
 assert.equal(new Set(packed.map.values()).size,packed.map.size);
 for(const [a,b]of packed.map)if(a!==b&&b.startsWith('v.'))assert.ok(!reserved.includes(b));
-const generated=JSON.parse(fs.readFileSync(new URL('../src/animations/cloth_cape.animation.json',import.meta.url)));
-assert.equal(generated.animations['animation.player.cape'].anim_time_update,packed.expression(raw),'built main matches tested export');
-for(const ch of chans)assert.equal(generated.animations['animation.player.cape'].bones[ch.bone][ch.channel][ch.axis],packed.expression(rawBones[ch.bone][ch.channel][ch.axis]));
+const prefix = profile.folder === 'default' ? '' : `subpacks/${profile.folder}/`;
+const generated=JSON.parse(fs.readFileSync(new URL(`../src/${prefix}animations/cloth_cape.animation.json`,import.meta.url)));
+assert.equal(generated.animations[profile.animation].anim_time_update,packed.expression(raw),'built main matches tested export');
+for(const id of profile.additionalAnimations ?? [])assert.deepEqual(generated.animations[id],generated.animations[profile.animation],'alias '+id);
+for(const ch of chans)assert.equal(generated.animations[profile.animation].bones[ch.bone][ch.channel][ch.axis],packed.expression(rawBones[ch.bone][ch.channel][ch.axis]));
+const generatedRender=JSON.parse(fs.readFileSync(new URL(`../src/${prefix}render_controllers/cloth_cape.render_controllers.json`,import.meta.url)));
+const encodeValues=x=>Array.isArray(x)?x.map(encodeValues):x&&typeof x==='object'?Object.fromEntries(Object.entries(x).map(([k,v])=>[k,encodeValues(v)])):typeof x==='string'?packed.expression(x):x;
+assert.deepEqual(generatedRender,encodeValues(render),'built renderer uses the same variable map');
+for(const name of profile.externalNames)assert.ok(!packed.map.has(name)||packed.map.get(name)===name,'external name '+name);
 for(const fps of [30,60,144]){
  const f=playerFixture(fps),v=strict({}),short=strict({});f.q.is_on_fire=()=>+(f.s.time>102&&f.s.time<104);f.q.body_y_rotation=()=>f.s.time*17;
  for(let frame=0;frame<fps*7;frame++){
@@ -54,4 +61,4 @@ for(const fps of [30,60,144]){
  }
  console.log('actual compacted export matches source, shuffled channels and render-first: '+fps+' fps');
 }
-console.log({validatedExpressions:expressions,mainChars:packed.expression(raw).length});
+console.log({profile:profile.animation,validatedExpressions:expressions,mainChars:packed.expression(raw).length});

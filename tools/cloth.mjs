@@ -6,11 +6,18 @@
 // q.bone_orientation_trs; Y is the yaw and z flip used by Simple Ragdoll's boneOutput.
 import { set, when, loop, flat, num, toMolang, cacheConstants } from "./molang.mjs";
 import { BURN_END, burnOrders, burnClock, burnCell, burnVar, burning } from "./burn.mjs";
+import { actionsAndStuff } from './actions-and-stuff.mjs';
+
+// Import with ?profile=actions_and_stuff_1_13 to build the optional subpack.
+// Separate module instances keep the vanilla build and its tests unchanged.
+const ACTIONS = new URL(import.meta.url).searchParams.get('profile') === actionsAndStuff.folder;
+export const profile = ACTIONS ? actionsAndStuff : { folder: 'default', animation: 'animation.player.cape', externalNames: [] };
 
 import { COLS, ROWS, W, H, depth, pid, restX, restY, tiles } from "./grid.mjs";
 export { COLS, ROWS, W, H, pid, restX, restY } from "./grid.mjs";
 export const ZMID = 2.5;                 // cape mid-plane at rest (cube z 2..3)
 const PX = 16 / 0.9375;                  // model pixels per block at the vanilla player scale
+const pixels = (factor = 1) => ACTIONS ? (factor === 1 ? 'v.cwunits' : `(${num(factor)}*v.cwunits)`) : num(factor * PX);
 const MARGIN = 0.5, HIP_Y = 12;          // half thickness; legs only push rows below the hip
 const CHEST_CLEARANCE = 0.5;            // extra room for the fitted cloth over chest armour
 const CHEST_HEM_GUARD = 1;             // collision allowance, independent of visual overlap
@@ -49,7 +56,7 @@ const WIND = envNum("WIND", 0.5), WIND_RAIN = 2.5, WIND_CALM = 0.15, AIR_MAX = 6
 const HEAT_LIFT = envNum("HEAT_LIFT", 1), HEAT_FLUTTER = envNum("HEAT_FLUTTER", 2);
 const WATER_DRAG = envNum("WATER_DRAG", 0.8), WATER_G = envNum("WATER_G", -0.05), LAVA_DRAG = 0.6, LAVA_G = 0.05;
 
-const canBurn = (r,c) => burnOrders.some(order => order.some(tile => tile.r===r && tile.c===c));
+const canBurn = (r,c) => !ACTIONS && burnOrders.some(order => order.some(tile => tile.r===r && tile.c===c));
 const NP = (ROWS + 1) * (COLS + 1);
 if (NP > 36 || ROWS * COLS > 36) throw new Error("grid too large for one-character keys");
 const key = i => i.toString(36);
@@ -131,7 +138,7 @@ function ridingOrigin(e) {
       set('v.cwv'+a, `math.lerp(v.cwv${a},v.cwl${a}*t.rm,t.rf)`),
       when('!t.sr', [set('t.rc', `t.r${a}-v.cwc${a}-v.cwv${a}*q.delta_time`),
         set('v.cwb'+a, `v.cwb${a}+t.rc`),
-        set('t.rc', `t.rc*${num(PX)}`), set('v.cwo'+a, `v.cwo${a}-t.rc`),
+        set('t.rc', `t.rc*${pixels()}`), set('v.cwo'+a, `v.cwo${a}-t.rc`),
         a==='y' ? [set('v.cwfl', 'v.cwfl-t.rc'), set('v.cwfh', 'v.cwfh-t.rc')] : []]),
       set('v.cwc'+a,e(k))]),
   ];
@@ -153,7 +160,7 @@ function origin() {
     ]),
     set('v.cwtk', 't.now'),
     when("t.sr", [AX.map(a => [set("v.cwb" + a, "t.r" + a), set("v.cwl" + a, `v.cwride?0:t.r${a}`)]), set("v.cwvx", 0), set("v.cwvz", 0), set("v.cwh", 0)]),
-    AX.map(a => set("t.o" + a, `(t.r${a}-v.cwb${a})*${num(PX)}`)),
+    AX.map(a => set("t.o" + a, `(t.r${a}-v.cwb${a})*${pixels()}`)),
     // Smoothed body velocity (blocks/s); flutter follows horizontal speed relative to the wind.
     when('!v.cwride', [
       AX.map(a => set("v.cwv" + a, `math.lerp(v.cwv${a},math.clamp((t.r${a}-v.cwl${a})/math.max(q.delta_time,0.001),-8,8),math.clamp(q.delta_time*8,0,1))`)),
@@ -194,7 +201,7 @@ function env() {
         // rails have no solid face; one-way cells only catch a fall from above.
         set("t.solid", `t.i!=${OWN[1]}&&q.block_has_any_tag(t.ex+t.dx,t.ey+t.dy,t.ez+t.dz,${SOLID})`),
         when("t.solid", set("t.solid", "q.block_has_any_tag(t.ex+t.dx,t.ey+t.dy,t.ez+t.dz,'rail')?0:(q.block_has_any_tag(t.ex+t.dx,t.ey+t.dy,t.ez+t.dz,'one_way_collidable')?2:1)")),
-        when("t.i==19", set("v.cwfl", `t.solid?(t.ey-v.cwby)*${num(PX)}+${num(MARGIN)}:-1000000`),
+        when("t.i==19", set("v.cwfl", `t.solid?(t.ey-v.cwby)*${pixels()}+${num(MARGIN)}:-1000000`),
           when("t.solid==2", set("v.cp_platform", "v.cp_platform+math.pow(2,t.i)"), when("t.solid", [
             set("t.support", "t.dy==0&&v.cp_grounded&&((t.dx==0||t.dx==t.fx)&&(t.dz==0||t.dz==t.fz)||(math.abs(t.dx+t.sx)<2&&math.abs(t.dz+t.sz)<2&&math.mod(math.floor(t.sm/math.pow(2,(t.dz+t.sz+1)*3+t.dx+t.sx+1)),2))||(v.cp_on_snow&&q.block_has_all_tags(t.ex+t.dx,t.ey,t.ez+t.dz,'snow','minecraft:is_shovel_item_destructible')))"),
             when("t.support", set("v.cp_support", "v.cp_support+math.pow(2,t.i)"),
@@ -204,11 +211,11 @@ function env() {
       // Wind exposure one block up: +x, +z, -x, -z neighbours and the ceiling.
       [14, 16, 12, 10].map((n, d) => set("v.cwj" + d, bit(n))), set("v.cwce", bit(18)),
       // Cell origin of the ring in sim pixels, for the per-particle lookup.
-      AX.map(a => set("v.cwo" + a, `(t.e${a}-v.cwb${a})*${num(PX)}`)),
+      AX.map(a => set("v.cwo" + a, `(t.e${a}-v.cwb${a})*${pixels()}`)),
     ]),
     // Ground contact gives an observed surface for snow, slabs, stairs, beds,
     // fences, etc. Update within a cell too; airborne queries use the cached floor.
-    when("v.cp_grounded", set("v.cwfl", `(${feetY}-v.cwby)*${num(PX)}+${num(MARGIN)}`)),
+    when("v.cp_grounded", set("v.cwfl", `(${feetY}-v.cwby)*${pixels()}+${num(MARGIN)}`)),
     // Fluids, every tick while the player is in one (q.is_in_contact_with_water also counts
     // rain): the surface is 0.9 above the highest wet cell of the feet cell and the two above;
     // particles below it get drag and buoyancy.
@@ -217,10 +224,10 @@ function env() {
       when("v.cwwe", [
         set("t.lv", "q.is_in_lava"),
         set("t.wy", "q.block_has_any_tag(t.ex,t.ey+2,t.ez,'water','lava')?2:q.block_has_any_tag(t.ex,t.ey+1,t.ez,'water','lava')?1:0"),
-        set("v.cwfh", `(t.ey+t.wy+0.9-v.cwby)*${num(PX)}`),
+        set("v.cwfh", `(t.ey+t.wy+0.9-v.cwby)*${pixels()}`),
         set("v.cwfd", `t.lv?${LAVA_DRAG}:${WATER_DRAG}`), set("v.cwfg", `t.lv?${LAVA_G}:${WATER_G}`),
       ], set("v.cwfh", -1000000)),
-      set("v.cwht", "math.clamp(v.cwht+(q.is_on_fire?0.1:-0.05),0,1)"),
+      set("v.cwht", ACTIONS ? 0 : "math.clamp(v.cwht+(q.is_on_fire?0.1:-0.05),0,1)"),
       set("v.cwsg", "v.cwtb+v.cwwe*1048576+(v.cwht>0)*2097152"),
     ]),
   ];
@@ -281,8 +288,8 @@ function frame() {
     // Another player's body (feet = camera - 1.62) close to this cape, in sim pixels.
     set("t.vn", "!q.is_local_player&&q.distance_from_camera<2.5"),
     when("t.vn", [set("t.vd", "q.distance_from_camera"), set("t.vp", "q.rotation_to_camera(0)"), set("t.vw", "q.rotation_to_camera(1)"),
-      set("t.vh", `t.vd*math.cos(t.vp)*${num(PX)}`), set("t.vcx", "t.ox-t.vh*math.sin(t.vw)"), set("t.vcz", "t.oz+t.vh*math.cos(t.vw)"),
-      set("t.vcy", `t.oy-t.vd*math.sin(t.vp)*${num(PX)}`)]),
+      set("t.vh", `t.vd*math.cos(t.vp)*${pixels()}`), set("t.vcx", "t.ox-t.vh*math.sin(t.vw)"), set("t.vcz", "t.oz+t.vh*math.cos(t.vw)"),
+      set("t.vcy", `t.oy-t.vd*math.sin(t.vp)*${pixels()}`)]),
     leg("t.rl", "rightleg", "r"), leg("t.ll", "leftleg", "l"), upperFrames(),
     AX.map((a, k) => set("t.a" + a, `t.b${a}+t.g${k}2*(${num(ZMID)}+v.cwaz)`)),
     // Target anchors; step() moves the persistent top row toward them across substeps.
@@ -372,19 +379,19 @@ function step() {
     // their existing response; only the cape outside water/lava gets this damping.
     set("t.moistResponse", "1-.9*v.cwwet*(1-v.cwwe)"),
     set("t.moistAir", `${num(AIR)}*t.moistResponse`),
-    set("t.dm", `math.exp(-${num(DRAG)}*t.moistResponse*t.h)`), set("t.gh", `${num(GRAVITY)}*t.h*t.h`),
+    set("t.dm", `math.exp(-${num(DRAG)}*t.moistResponse*t.h)`), set("t.gh", `${pixels(16)}*t.h*t.h`),
     // Internal wet damping is relative to the wearer. Damping absolute world
     // velocity would act as extra air drag and lift the wet cape MORE when running.
     set('t.moistDamp','math.exp(-8*v.cwwet*(1-v.cwwe)*t.h)'),
-    AX.map(a=>set('t.moistCarry'+a,`(1-t.moistDamp)*v.cwv${a}*${num(PX)}*t.h`)),
+    AX.map(a=>set('t.moistCarry'+a,`(1-t.moistDamp)*v.cwv${a}*${pixels()}*t.h`)),
     // One gentle outward pulse for shedding embers, applied to the shared grid.
-    set("t.puff", "v.cwbt>1?math.sin(math.clamp((v.cwbr-1.25)/0.3,0,1)*180):0"),
+    set("t.puff", ACTIONS ? 0 : "v.cwbt>1?math.sin(math.clamp((v.cwbr-1.25)/0.3,0,1)*180):0"),
     // A water current pushes the width together; out-of-phase column forces
     // buckle the tall upper cells while buoyancy compresses them from below.
     set("t.colphase", `v.cwwe?0:${num(32/COLS)}`),
-    set("t.fh", `(v.cwsp*${num(FLUTTER)}*t.moistResponse+100*t.puff)*t.h*t.h`), set("t.tp", "math.mod(q.life_time,40)*900"),
+    set("t.fh", `(v.cwsp*${pixels(FLUTTER/PX)}*t.moistResponse+100*t.puff)*t.h*t.h`), set("t.tp", "math.mod(q.life_time,40)*900"),
     // Wind as a per-step displacement; fluid drag and the buoyancy-reduced gravity.
-    set("t.wx", `v.cwnx*${num(PX)}*t.h*t.moistResponse`), set("t.wz", `v.cwnz*${num(PX)}*t.h*t.moistResponse`),
+    set("t.wx", `v.cwnx*${pixels()}*t.h*t.moistResponse`), set("t.wz", `v.cwnz*${pixels()}*t.h*t.moistResponse`),
     set("t.fd", "math.pow(v.cwfd,t.h*60)"), set("t.gw", "v.cwfg*t.gh"),
     set("t.gh", `t.gh*(1-${num(HEAT_LIFT)}*v.cwht)`),  // hot air rising takes weight off the cape
     // A wave running from the shoulders to the hem, nearly in phase across a row.
@@ -475,7 +482,7 @@ function upperContacts() {
   ])]);
 }
 function contacts() {
-  const px=num(PX),gap=num(WALL_GAP);
+  const px=pixels(),gap=num(WALL_GAP);
   return [set('t.ci',0),loop(colliders.length,[
     set('t.qloaded','t.ci>=18||v.cwtb>0||v.cp_platform>0'),
     dispatch('t.ci',colliders,i=>[set('t.active',mass(i)),when('t.active>0.001',[AX.map(a=>set('t.p'+a,P(i,a))),when('t.ci>=18||v.cwtb>0||v.cp_platform>0',AX.map(a=>set('t.q'+a,Q(i,a))))])]),
@@ -506,8 +513,8 @@ function contacts() {
               AX.map(a=>when(`t.zd${a}==t.zm`,set('t.p'+a,'t.zc'+a))),set('t.ch',1)])])]),
         when('t.py<v.cwfl',[set('t.py','v.cwfl'),set('t.ch',1)]),
         when('t.vn',[set('t.yx','t.px-t.vcx'),set('t.yz','t.pz-t.vcz'),set('t.yd','math.sqrt(t.yx*t.yx+t.yz*t.yz)'),
-          when(`t.yd<${num(VIEWER_R*PX)}&&t.yd>0.001&&t.py>t.vcy&&t.py<t.vcy+${num(VIEWER_H*PX)}`,[
-            set('t.px',`t.vcx+t.yx*${num(VIEWER_R*PX)}/t.yd`),set('t.pz',`t.vcz+t.yz*${num(VIEWER_R*PX)}/t.yd`),set('t.ch',1)])])]),
+          when(`t.yd<${pixels(VIEWER_R)}&&t.yd>0.001&&t.py>t.vcy&&t.py<t.vcy+${pixels(VIEWER_H)}`,[
+            set('t.px',`t.vcx+t.yx*${pixels(VIEWER_R)}/t.yd`),set('t.pz',`t.vcz+t.yz*${pixels(VIEWER_R)}/t.yd`),set('t.ch',1)])])]),
       when('t.ch',dispatch('t.ci',colliders,i=>AX.map(a=>set(P(i,a),'t.p'+a)))),
       when('t.qh',dispatch('t.ci',colliders,i=>AX.map(a=>set(Q(i,a),'t.q'+a))))
     ]),set('t.ci','t.ci+1')])];
@@ -566,7 +573,8 @@ function cell(r, c) {
     set(CV(r, c, "rz"), "-math.atan2(t.u1,t.u0)"),
     AX.map((a, k) => set(CV(r, c, "p" + a), `t.m${a}-${num(pivot[k])}`)),
     set(CV(r, c, "sx"), "t.sq+t.sw"), set(CV(r, c, "sy"), "t.sq-t.sw"), set(CV(r, c, "iz"), "(t.a1-t.a2)*.5"),
-    set(CV(r,c,'variant'), `(${burnVar(r,c,'s')}??0)==2?4:(${attachmentBit(r,c-1,1)})+(${attachmentBit(r,c+1,2)})+(${attachmentBit(r+1,c,8)})`),
+    set(CV(r,c,'variant'), ACTIONS ? (c>0?1:0)+(c<COLS-1?2:0)+(r<ROWS-1?8:0)
+      : `(${burnVar(r,c,'s')}??0)==2?4:(${attachmentBit(r,c-1,1)})+(${attachmentBit(r,c+1,2)})+(${attachmentBit(r+1,c,8)})`),
   ];
 }
 const VISIBLE = "q.has_cape&&!(v.is_first_person??0)&&!(v.map_face_icon??0)&&!q.is_spectator&&!q.is_item_name_any('slot.armor.chest',0,'minecraft:elytra')";
@@ -605,6 +613,10 @@ function body() {
     when("!q.is_in_ui&&!(v.is_paperdoll??0)", [
       // Moisture follows the actor even while first-person or an elytra hides the cape.
       wetUpdate(),
+      // A&S's small-player setting changes entity scale, not bone geometry.
+      // Rebase when that setting changes so terrain and world forces stay aligned.
+      ACTIONS ? [set('t.pxnext', `16/((v.tnlxsa??0)==1?0.6:0.9375)`),
+        when('v.cwunits!=t.pxnext', [set('v.cwunits','t.pxnext'),set('v.cwok',0)])] : [],
       // A&S guards queries with the animation clock. Skin/cape reloads can restart
       // this clock without restarting the player lifetime or clearing variables.
       when("q.anim_time<(v.cwclock??0)", [set("v.cwwu", 0), set("v.cwok", 0), set("v.cwlt", -1)]),
@@ -613,7 +625,7 @@ function body() {
       // animation also runs in actorless previews, so guard the call here.
       // The locator alone can stay zero while wearing armour; keep guaranteed
       // chestplate room shared by the collar and collision in world passes.
-      set("v.cwaz", `math.max(v.cwaz+(v.cwaz>0?${num(CHEST_CLEARANCE)}:0),q.has_armor_slot(1)?${num(1+CHEST_CLEARANCE)}:0)`),
+      set("v.cwaz", `math.max(v.cwaz+(v.cwaz>0?${num(CHEST_CLEARANCE)}:0),${ACTIONS ? "!(v.svawlg??0)&&!(v.oreville_chestplate_armor_layer_hidden??0)&&!q.is_item_name_any('slot.armor.chest','','minecraft:elytra')" : 'q.has_armor_slot(1)'}?${num(1+CHEST_CLEARANCE)}:0)`),
       // A&S also guards bone queries against a clock rollback. A cosmetic reload
       // can retain our variables while rebuilding geometry: rearm the existing
       // 0.1 s warmup before querying it again. UI passes never touch this clock.
@@ -623,7 +635,7 @@ function body() {
         // Count warmup once per world frame too, even with multiple render passes.
         // v.cwst counts simulated frames for the bone-channel output cache.
         when("v.cwwu<0.1", [set("v.cwwu", "v.cwwu+math.clamp(q.delta_time,0,0.05)"), set("v.cwok", 0)], [
-          origin(), env(), burnClock(), material(), wind(),
+          origin(), env(), ACTIONS ? [] : burnClock(), material(), wind(),
           when("t.sr", set("v.cwac", 0)), schedule(),
           when("t.sr||t.n>0", [frame(), when("t.sr",reset()), seedDetached(),
             // Asleep: skip the step (the cells stay cached) until an anchor or a leg moves.
@@ -724,11 +736,11 @@ export function renderController() {
   const visibility={};
   each((r,c)=>{
     const full=(c>0?1:0)+(c<COLS-1?2:0)+(r<ROWS-1?8:0),mode=`((v.cwon??0)?(${CV(r,c,'variant')}??${full}):${full})`;
-    for(const {code} of meshVariants(r,c)) visibility[boneNames(r,c).mesh+'_'+code]=`${show}&&${mode}==${code}&&(!(v.cwon??0)||(${burnVar(r,c,'show')}??1))`;
+    for(const {code} of meshVariants(r,c)) visibility[boneNames(r,c).mesh+'_'+code]=ACTIONS ? show : `${show}&&${mode}==${code}&&(!(v.cwon??0)||(${burnVar(r,c,'show')}??1))`;
   });
   return {format_version:'1.8.0',render_controllers:{'controller.render.player.cape':{
     rebuild_animation_matrices:true,geometry:'Geometry.cape',materials:[{'*':'Material.cape'}],textures:['Texture.cape'],
-    part_visibility:[visibility],is_hurt_color:{r:0,g:0,b:0,a:0},
+    part_visibility:[visibility],...(ACTIONS ? actionsAndStuff.effects : {is_hurt_color:{r:0,g:0,b:0,a:0}}),
     overlay_color:{r:0,g:0,b:0,a:toMolang([wetUpdate()])+`return ${wetTint};`}
   }}};
 }

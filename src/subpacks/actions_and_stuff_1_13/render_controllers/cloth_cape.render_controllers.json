@@ -1,0 +1,64 @@
+{
+ "format_version": "1.8.0",
+ "render_controllers": {
+  "controller.render.player.cape": {
+   "rebuild_animation_matrices": true,
+   "geometry": "Geometry.cape",
+   "materials": [
+    {
+     "*": "Material.cape"
+    }
+   ],
+   "textures": [
+    "Texture.cape"
+   ],
+   "part_visibility": [
+    {
+     "cloth_0_0_m_10": "query.armor_texture_slot(1) != 5 && (!variable.is_first_person || variable.is_paperdoll) && !variable.map_face_icon && !query.is_spectator",
+     "cloth_0_1_m_11": "query.armor_texture_slot(1) != 5 && (!variable.is_first_person || variable.is_paperdoll) && !variable.map_face_icon && !query.is_spectator",
+     "cloth_0_2_m_11": "query.armor_texture_slot(1) != 5 && (!variable.is_first_person || variable.is_paperdoll) && !variable.map_face_icon && !query.is_spectator",
+     "cloth_0_3_m_11": "query.armor_texture_slot(1) != 5 && (!variable.is_first_person || variable.is_paperdoll) && !variable.map_face_icon && !query.is_spectator",
+     "cloth_0_4_m_9": "query.armor_texture_slot(1) != 5 && (!variable.is_first_person || variable.is_paperdoll) && !variable.map_face_icon && !query.is_spectator",
+     "cloth_1_0_m_10": "query.armor_texture_slot(1) != 5 && (!variable.is_first_person || variable.is_paperdoll) && !variable.map_face_icon && !query.is_spectator",
+     "cloth_1_1_m_11": "query.armor_texture_slot(1) != 5 && (!variable.is_first_person || variable.is_paperdoll) && !variable.map_face_icon && !query.is_spectator",
+     "cloth_1_2_m_11": "query.armor_texture_slot(1) != 5 && (!variable.is_first_person || variable.is_paperdoll) && !variable.map_face_icon && !query.is_spectator",
+     "cloth_1_3_m_11": "query.armor_texture_slot(1) != 5 && (!variable.is_first_person || variable.is_paperdoll) && !variable.map_face_icon && !query.is_spectator",
+     "cloth_1_4_m_9": "query.armor_texture_slot(1) != 5 && (!variable.is_first_person || variable.is_paperdoll) && !variable.map_face_icon && !query.is_spectator",
+     "cloth_2_0_m_10": "query.armor_texture_slot(1) != 5 && (!variable.is_first_person || variable.is_paperdoll) && !variable.map_face_icon && !query.is_spectator",
+     "cloth_2_1_m_11": "query.armor_texture_slot(1) != 5 && (!variable.is_first_person || variable.is_paperdoll) && !variable.map_face_icon && !query.is_spectator",
+     "cloth_2_2_m_11": "query.armor_texture_slot(1) != 5 && (!variable.is_first_person || variable.is_paperdoll) && !variable.map_face_icon && !query.is_spectator",
+     "cloth_2_3_m_11": "query.armor_texture_slot(1) != 5 && (!variable.is_first_person || variable.is_paperdoll) && !variable.map_face_icon && !query.is_spectator",
+     "cloth_2_4_m_9": "query.armor_texture_slot(1) != 5 && (!variable.is_first_person || variable.is_paperdoll) && !variable.map_face_icon && !query.is_spectator",
+     "cloth_3_0_m_10": "query.armor_texture_slot(1) != 5 && (!variable.is_first_person || variable.is_paperdoll) && !variable.map_face_icon && !query.is_spectator",
+     "cloth_3_1_m_11": "query.armor_texture_slot(1) != 5 && (!variable.is_first_person || variable.is_paperdoll) && !variable.map_face_icon && !query.is_spectator",
+     "cloth_3_2_m_11": "query.armor_texture_slot(1) != 5 && (!variable.is_first_person || variable.is_paperdoll) && !variable.map_face_icon && !query.is_spectator",
+     "cloth_3_3_m_11": "query.armor_texture_slot(1) != 5 && (!variable.is_first_person || variable.is_paperdoll) && !variable.map_face_icon && !query.is_spectator",
+     "cloth_3_4_m_9": "query.armor_texture_slot(1) != 5 && (!variable.is_first_person || variable.is_paperdoll) && !variable.map_face_icon && !query.is_spectator",
+     "cloth_4_0_m_2": "query.armor_texture_slot(1) != 5 && (!variable.is_first_person || variable.is_paperdoll) && !variable.map_face_icon && !query.is_spectator",
+     "cloth_4_1_m_3": "query.armor_texture_slot(1) != 5 && (!variable.is_first_person || variable.is_paperdoll) && !variable.map_face_icon && !query.is_spectator",
+     "cloth_4_2_m_3": "query.armor_texture_slot(1) != 5 && (!variable.is_first_person || variable.is_paperdoll) && !variable.map_face_icon && !query.is_spectator",
+     "cloth_4_3_m_3": "query.armor_texture_slot(1) != 5 && (!variable.is_first_person || variable.is_paperdoll) && !variable.map_face_icon && !query.is_spectator",
+     "cloth_4_4_m_1": "query.armor_texture_slot(1) != 5 && (!variable.is_first_person || variable.is_paperdoll) && !variable.map_face_icon && !query.is_spectator"
+    }
+   ],
+   "is_hurt_color": {
+    "r": "v.tsrqrd=1;return 1;",
+    "g": 1,
+    "b": 1,
+    "a": "Math.lerp(.6-Math.mod(q.life_time,.25)*2.4,0,Math.clamp((v.cdnffy??0)/.5,0,1))"
+   },
+   "on_fire_color": {
+    "r": 1,
+    "g": 0.4,
+    "b": 0,
+    "a": "Math.cos(q.life_time*1200)*-.35+.35"
+   },
+   "overlay_color": {
+    "r": 0,
+    "g": 0,
+    "b": 0,
+    "a": "(!q.is_in_ui&&!(v.is_paperdoll??0))?{(q.life_time!=(v.al??-1))?{v.pf=math.clamp((v.pf??0)+(q.is_in_water?4:q.is_in_water_or_rain?.7:-(q.entity_biome_has_any_tags('desert','nether')?.3:.1))*math.clamp(q.delta_time,0,.1),0,1);v.al=q.life_time;};};return !q.is_in_ui&&!(v.is_paperdoll??0)?(v.pf??0)*.45:0;"
+   }
+  }
+ }
+}

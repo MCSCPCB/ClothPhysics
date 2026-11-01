@@ -3,46 +3,55 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { program, bones, geometry, renderController } from "./cloth.mjs";
-import { toMolang, checkMolang, compactNames } from "./molang.mjs";
+import * as vanilla from './cloth.mjs';
+import * as actions from './cloth.mjs?profile=actions_and_stuff_1_13';
+import { exportPack } from './export-pack.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const src = path.join(root, "src"), LIMIT = 61500;
+const src = path.join(root, "src");
 const write = (rel, data) => {
   const file = path.join(src, rel);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, typeof data === "string" ? data : JSON.stringify(data, null, 1) + "\n");
 };
 
-// Validate Bedrock grammar and argument counts before writing any pack files.
-const rawUpdate = toMolang(program()) + "return math.min(q.anim_time+q.delta_time,.5);", rawBones = bones(), rawRender = renderController();
-const { expression: encode } = compactNames([rawUpdate, JSON.stringify(rawBones), JSON.stringify(rawRender)]);
-const encodeValues = value => Array.isArray(value) ? value.map(encodeValues) : value && typeof value === 'object'
-  ? Object.fromEntries(Object.entries(value).map(([key,item]) => [key,encodeValues(item)])) : typeof value === 'string' ? encode(value) : value;
-const builtBones = encodeValues(rawBones), builtRender = encodeValues(rawRender);
-const update = checkMolang(encode(rawUpdate), "anim_time_update");
-for (const [b, ch] of Object.entries(builtBones)) for (const [c, vals] of Object.entries(ch)) vals.forEach((x, i) => checkMolang(String(x), `${b}.${c}[${i}]`));
-for (const [controller, config] of Object.entries(builtRender.render_controllers)) {
-  for (const part of config.part_visibility)
-    for (const [bone, expression] of Object.entries(part)) checkMolang(expression, `${controller}.${bone}`);
-  for (const [component, expression] of Object.entries(config.overlay_color))
-    checkMolang(String(expression), `${controller}.overlay_color.${component}`);
-}
-if (update.length > LIMIT) throw new Error(`anim_time_update is ${update.length} chars, over ${LIMIT}`);
-const channelMax = Math.max(...Object.values(builtBones).flatMap(b => Object.values(b).flat()).map(e => String(e).length));
-if (channelMax > LIMIT) throw new Error(`a bone channel is ${channelMax} chars, over ${LIMIT}`);
+// Validate both profiles before writing any pack files.
+const standard = exportPack(vanilla), adapted = exportPack(actions);
 
 // Keep UUIDs stable across rebuilds so the game treats it as the same pack.
 const old = fs.existsSync(path.join(src, "manifest.json")) ? JSON.parse(fs.readFileSync(path.join(src, "manifest.json"), "utf8")) : null;
 write("manifest.json", {
   format_version: 3,
-  header: { name: "ClothPhysics", description: "物理披风：粒子网格布料，玩家身体碰撞。", uuid: old?.header.uuid ?? crypto.randomUUID(),
+  header: { name: "pack.name", description: "pack.description", uuid: old?.header.uuid ?? crypto.randomUUID(),
     version: "0.2.0", min_engine_version: "1.26.50" },
   modules: [{ type: "resources", uuid: old?.modules[0].uuid ?? crypto.randomUUID(), version: "0.2.0" }],
+  capabilities: ['pbr'],
+  metadata: { authors: ['MINECRAFT-SCPCB'] },
+  // Bedrock initially selects the last subpack. Keep the standard mode last.
+  subpacks: [
+    { folder_name: actions.profile.folder, name: 'Compatible with Actions & Stuff 1.13 §8Place this pack above Actions & Stuff', memory_performance_tier: 0 },
+    { folder_name: vanilla.profile.folder, name: 'Default', memory_performance_tier: 0 },
+  ],
 });
-write("animations/cloth_cape.animation.json", { format_version: "1.8.0", animations: { "animation.player.cape": {
-  loop: true, animation_length: 1, anim_time_update: update, bones: builtBones } } });
-write("models/entity/cloth_cape.geo.json", geometry());
-write("render_controllers/cloth_cape.render_controllers.json", builtRender);
+// Standard resources live at the pack root; the optional subpack overrides them.
+for (const [prefix, pack] of [['', standard], [`subpacks/${actions.profile.folder}/`, adapted]]) {
+  write(prefix + 'animations/cloth_cape.animation.json', pack.animation);
+  write(prefix + 'models/entity/cloth_cape.geo.json', pack.geometry);
+  write(prefix + 'render_controllers/cloth_cape.render_controllers.json', pack.render);
+}
+// Language files in src/texts are editable resource-pack source files.
+const languages = ['en_US', 'zh_CN'];
+write('texts/languages.json', languages);
+write('subpacks/default/texts/languages.json', languages);
+// Remove only obsolete generated files from the experimental split layout.
+// Never delete directories recursively: unrelated files are user-owned.
+for (const rel of ['subpacks/default/animations/cloth_cape.animation.json', 'subpacks/default/models/entity/cloth_cape.geo.json',
+  'subpacks/default/render_controllers/cloth_cape.render_controllers.json'])
+  fs.rmSync(path.join(src, rel), { force: true });
+for (const rel of ['subpacks/default/animations', 'subpacks/default/models/entity', 'subpacks/default/models', 'subpacks/default/render_controllers']) {
+  const dir = path.join(src, rel);
+  if (fs.existsSync(dir) && fs.readdirSync(dir).length === 0) fs.rmdirSync(dir);
+}
 fs.copyFileSync(path.join(root, "_sample", "pack_icon.png"), path.join(src, "pack_icon.png"));
-console.log(`src written: anim_time_update ${update.length} chars, largest channel ${channelMax} chars`);
+for (const [label, pack] of [['Default', standard], ['Actions & Stuff 1.13', adapted]])
+  console.log(`${label}: anim_time_update ${pack.updateLength} chars, largest channel ${pack.channelMax} chars`);
