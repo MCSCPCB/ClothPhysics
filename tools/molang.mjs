@@ -1,3 +1,7 @@
+import { expressionCompactor } from './export/syntax.mjs';
+import { minifier } from './export/minify.mjs';
+import reservedNames from './export/reserved.mjs';
+const compactExpression = expressionCompactor();
 // Minimal statement tree for generated Molang. The same tree prints as Molang
 // for the pack and as JavaScript for the Node check, so both run identical logic.
 
@@ -6,7 +10,23 @@ export const when = (cond, yes, no = []) => ({ kind: "if", cond: String(cond), y
 export const loop = (count, body) => ({ kind: "loop", count: String(count), body: [body].flat(Infinity) });
 export const flat = (...nodes) => nodes.flat(Infinity).filter(Boolean);
 
-// Short fixed-point numbers; Molang has no exponent guarantee, so never emit "e".
+// Share repeated numeric literals within one expression. Bone channels are separate
+// evaluations and must not depend on these temporaries. Match whole numeric tokens
+// only: query strings and variable/struct names must keep their original spelling.
+export function cacheConstants(nodes, literals) {
+  return literals.reduce((tree, literal, index) => {
+    const name = 't.constant' + index;
+    const pattern = new RegExp('(?<![a-z0-9_.])' + literal.replaceAll('.', '\\.') + '(?![a-z0-9_.])', 'g');
+    const expr = text => String(text).split(/('(?:\\.|[^'\\])*')/g)
+      .map((part, i) => i % 2 ? part : part.replace(pattern, name)).join('');
+    const walk = list => list.map(n => n.kind === 'set' ? { ...n, expr: expr(n.expr) }
+      : n.kind === 'if' ? { ...n, cond: expr(n.cond), yes: walk(n.yes), no: walk(n.no) }
+      : { ...n, count: expr(n.count), body: walk(n.body) });
+    return [set(name, literal), ...walk(tree)];
+  }, flat(nodes));
+}
+
+// Readable fixed-point constants; the final SR exporter picks an exact shorter representation.
 export function num(n) {
   if (!Number.isFinite(n)) throw new Error("non-finite constant " + n);
   let s = (Math.abs(n) < 1e-9 ? 0 : n).toFixed(5).replace(/0+$/, "").replace(/\.$/, "");
@@ -17,8 +37,9 @@ export function num(n) {
 
 export function toMolang(nodes) {
   const out = [];
-  for (const n of flat(nodes)) {
-    if (n.kind === "set") out.push(`${n.name}=${n.expr};`);
+  for (const node of flat(nodes)) {
+    const n = node.kind === "if" ? {...node, cond: compactExpression(node.cond)} : node.kind === "loop" ? {...node, count: compactExpression(node.count)} : node;
+    if (n.kind === "set") out.push(`${n.name}=${compactExpression(n.expr)};`);
     else if (n.kind === "if") out.push(`${n.cond.includes("?") ? "("+n.cond+")" : n.cond}?{${toMolang(n.yes)}}${n.no.length ? `:{${toMolang(n.no)}}` : ""};`);
     else if (n.kind === "loop") out.push(`loop(${n.count},{${toMolang(n.body)}});`);
   }
@@ -29,19 +50,14 @@ export function toMolang(nodes) {
 // pack-local names at export only; every animation and visibility expression shares
 // one map. Vanilla player variables and query/struct member names stay untouched.
 export function compactNames(texts) {
-  const counts = new Map();
-  const pattern = /(?<![a-z0-9_.])(?:v\.c[a-z0-9_]+|t\.[a-z][a-z0-9_]*)\b/g;
-  // The first expression is the shared physics step and has the tightest budget.
-  for (const [index, text] of texts.entries()) for (const [name] of text.matchAll(pattern)) counts.set(name, (counts.get(name) ?? 0) + (index === 0 ? 200 : 1));
-  const names = [...counts.keys()].sort((a,b) => counts.get(b)-counts.get(a) || a.localeCompare(b));
-  let persistent = 0, temporary = 0;
-  const map = new Map(names.map(name => {
-    const i = temporary;
-    return [name, name.startsWith('v.') ? `v.c${(persistent++).toString(36)}` :
-      (temporary++, `t.${String.fromCharCode(97+i%26)}${i<26?'':Math.floor(i/26).toString(36)}`)];
-  }));
-  const encode = text => String(text).replace(pattern, name => map.get(name) ?? name);
-  return { map, encode };
+  const all = texts.join(''), externalNames = [...new Set([...all.matchAll(/\bv\.\w+/g)].map(x => x[0]).filter(n => !n.startsWith('v.c')))];
+  const expression = minifier({ frequencyText: texts[0].repeat(200) + texts.slice(1).join(''), reservedNames, externalNames });
+  // Stable temporaries for source-tree comparisons. Actual output uses expression(),
+  // whose temporary map belongs to one complete expression, never to JSON or a statement.
+  const temps = [...new Set([...all.matchAll(/\bt\.\w+/g)].map(x => x[0]))];
+  const map = new Map([...expression.roots, ...temps.map((n,i) => [n,'t.t'+i.toString(36)])]);
+  const encode = text => String(text).replace(/'[^']*'|(?<![\w.])[vt]\.\w+/g, name => name.startsWith("'") ? name : map.get(name) ?? name);
+  return { map, encode, expression };
 }
 
 // Molang expression -> JS expression. Only the subset the generator emits.
@@ -109,6 +125,6 @@ export function checkMolang(text, where) {
     }
     if (args !== ARITY[m[1]]) throw new Error(`${where}: math.${m[1]} takes ${ARITY[m[1]]} arguments, got ${args}: ${text.slice(m.index, i + 1).slice(0, 100)}`);
   }
-  if (/\d[eE][+-]?\d/.test(text.replace(/[a-z_]+\.[a-z0-9_]+/g, ""))) throw new Error(`${where}: exponent number literal`);
+  // Exponents are emitted by Simple Ragdoll and used in A&S terrain expressions.
   return text;
 }

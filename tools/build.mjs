@@ -15,14 +15,19 @@ const write = (rel, data) => {
 };
 
 // Validate Bedrock grammar and argument counts before writing any pack files.
-const rawUpdate = toMolang(program()) + "return 0;", rawBones = bones(), rawRender = renderController();
-const { encode } = compactNames([rawUpdate, JSON.stringify(rawBones), JSON.stringify(rawRender)]);
-const builtBones = JSON.parse(encode(JSON.stringify(rawBones))), builtRender = JSON.parse(encode(JSON.stringify(rawRender)));
+const rawUpdate = toMolang(program()) + "return math.min(q.anim_time+q.delta_time,.5);", rawBones = bones(), rawRender = renderController();
+const { expression: encode } = compactNames([rawUpdate, JSON.stringify(rawBones), JSON.stringify(rawRender)]);
+const encodeValues = value => Array.isArray(value) ? value.map(encodeValues) : value && typeof value === 'object'
+  ? Object.fromEntries(Object.entries(value).map(([key,item]) => [key,encodeValues(item)])) : typeof value === 'string' ? encode(value) : value;
+const builtBones = encodeValues(rawBones), builtRender = encodeValues(rawRender);
 const update = checkMolang(encode(rawUpdate), "anim_time_update");
 for (const [b, ch] of Object.entries(builtBones)) for (const [c, vals] of Object.entries(ch)) vals.forEach((x, i) => checkMolang(String(x), `${b}.${c}[${i}]`));
-for (const [controller, config] of Object.entries(builtRender.render_controllers))
+for (const [controller, config] of Object.entries(builtRender.render_controllers)) {
   for (const part of config.part_visibility)
     for (const [bone, expression] of Object.entries(part)) checkMolang(expression, `${controller}.${bone}`);
+  for (const [component, expression] of Object.entries(config.overlay_color))
+    checkMolang(String(expression), `${controller}.overlay_color.${component}`);
+}
 if (update.length > LIMIT) throw new Error(`anim_time_update is ${update.length} chars, over ${LIMIT}`);
 const channelMax = Math.max(...Object.values(builtBones).flatMap(b => Object.values(b).flat()).map(e => String(e).length));
 if (channelMax > LIMIT) throw new Error(`a bone channel is ${channelMax} chars, over ${LIMIT}`);

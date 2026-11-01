@@ -4,8 +4,8 @@
 //   sim        = world axes, origin at the rebased block position v.cwb
 // G = Y*R maps body-local offsets into sim. R is the animated body rotation from
 // q.bone_orientation_trs; Y is the yaw and z flip used by Simple Ragdoll's boneOutput.
-import { set, when, loop, flat, num, toMolang } from "./molang.mjs";
-import { BURN_ROWS, BURN_END, burnClock, burnCell, burnVar, burning } from "./burn.mjs";
+import { set, when, loop, flat, num, toMolang, cacheConstants } from "./molang.mjs";
+import { BURN_END, burnOrders, burnClock, burnCell, burnVar, burning } from "./burn.mjs";
 
 import { COLS, ROWS, W, H, depth, pid, restX, restY, tiles } from "./grid.mjs";
 export { COLS, ROWS, W, H, pid, restX, restY } from "./grid.mjs";
@@ -49,6 +49,7 @@ const WIND = envNum("WIND", 0.5), WIND_RAIN = 2.5, WIND_CALM = 0.15, AIR_MAX = 6
 const HEAT_LIFT = envNum("HEAT_LIFT", 1), HEAT_FLUTTER = envNum("HEAT_FLUTTER", 2);
 const WATER_DRAG = envNum("WATER_DRAG", 0.8), WATER_G = envNum("WATER_G", -0.05), LAVA_DRAG = 0.6, LAVA_G = 0.05;
 
+const canBurn = (r,c) => burnOrders.some(order => order.some(tile => tile.r===r && tile.c===c));
 const NP = (ROWS + 1) * (COLS + 1);
 if (NP > 36 || ROWS * COLS > 36) throw new Error("grid too large for one-character keys");
 const key = i => i.toString(36);
@@ -80,6 +81,28 @@ const R = [
 const yawMap = (x, y, z) => [`t.cy*${x}+t.sy*${z}`, y, `t.sy*${x}-t.cy*${z}`];
 const simPoint = (out, s) => yawMap(`${s}.t.x`, `${s}.t.y`, `${s}.t.z`).map((e, k) => set(out + AX[k], `t.o${AX[k]}+${e}`));
 const TORSO = ["t.g02", "t.g12", "t.g22"], RLEG = ["t.rnx", "t.rny", "t.rnz"], LLEG = ["t.lnx", "t.lny", "t.lnz"];
+// Local cuboids follow the same native bone TRS -> simulation transform as the legs.
+// The arm includes the hand; the centre is offset from the shoulder pivot.
+const UPPER = [
+  { bone: 'rightarm', centre: [-1,-4,0], half: [2,6,2] },
+  { bone: 'leftarm', centre: [1,-4,0], half: [2,6,2] },
+];
+function upperFrames() {
+  return [UPPER.map(({bone,centre,half},i) => [
+    set('t.limb', `q.bone_orientation_trs('${bone}')`), euler('t.limb'),
+    [0,1,2].map(j => yawMap(`(${R[0][j]})`, `(${R[1][j]})`, `(${R[2][j]})`)
+      .map((e,k) => set(`t.u${i}${k}${j}`,e))),
+    [0,1,2].map(j=>set('t.side'+j,TORSO.map((n,k)=>`t.u${i}${k}${j}*${n}`).join('+'))),
+    set(`t.u${i}face`,'math.abs(t.side0)>math.abs(t.side1)?(math.abs(t.side0)>math.abs(t.side2)?0:2):(math.abs(t.side1)>math.abs(t.side2)?1:2)'),
+    set(`t.u${i}sign`,`(t.u${i}face==0?t.side0:t.u${i}face==1?t.side1:t.side2)<0?-1:1`),
+    simPoint('t.up','t.limb'),
+    AX.map((a,k) => set(`t.u${i}${a}`, `t.up${a}`+centre.map((x,j)=>x?`+t.u${i}${k}${j}*${num(x)}`:'').join(''))),
+    // A cheap world AABB rejects most points before doing the oriented test.
+    AX.map((a,k)=>[set('t.extent',half.map((h,j)=>`math.abs(t.u${i}${k}${j})*${num(h+0.4)}`).join('+')),
+      set(`t.u${i}lo${a}`,`t.u${i}${a}-t.extent`),set(`t.u${i}hi${a}`,`t.u${i}${a}+t.extent`)]),
+  ]), AX.map(a=>['lo','hi'].map((bound,k)=>set('t.upper'+bound+a,
+    `math.${k?'max':'min'}(t.u0${bound}${a},t.u1${bound}${a})`)))];
+}
 // Interpolate the tick-stepped actor position, as Simple Ragdoll's anchorPrograms(). A
 // player's q.position(1) is the eye, 1.62 above the feet (VanillaRagdoll's player rig
 // subtracts it too); everything here works from the feet.
@@ -131,9 +154,9 @@ function origin() {
     set('v.cwtk', 't.now'),
     when("t.sr", [AX.map(a => [set("v.cwb" + a, "t.r" + a), set("v.cwl" + a, `v.cwride?0:t.r${a}`)]), set("v.cwvx", 0), set("v.cwvz", 0), set("v.cwh", 0)]),
     AX.map(a => set("t.o" + a, `(t.r${a}-v.cwb${a})*${num(PX)}`)),
-    // Smoothed horizontal body velocity (blocks/s); flutter follows the speed relative to the wind.
+    // Smoothed body velocity (blocks/s); flutter follows horizontal speed relative to the wind.
     when('!v.cwride', [
-      ["x", "z"].map(a => set("v.cwv" + a, `math.lerp(v.cwv${a},math.clamp((t.r${a}-v.cwl${a})/math.max(q.delta_time,0.001),-8,8),math.clamp(q.delta_time*8,0,1))`)),
+      AX.map(a => set("v.cwv" + a, `math.lerp(v.cwv${a},math.clamp((t.r${a}-v.cwl${a})/math.max(q.delta_time,0.001),-8,8),math.clamp(q.delta_time*8,0,1))`)),
       AX.map(a => set("v.cwl" + a, "t.r" + a)),
     ]),
   ];
@@ -260,7 +283,7 @@ function frame() {
     when("t.vn", [set("t.vd", "q.distance_from_camera"), set("t.vp", "q.rotation_to_camera(0)"), set("t.vw", "q.rotation_to_camera(1)"),
       set("t.vh", `t.vd*math.cos(t.vp)*${num(PX)}`), set("t.vcx", "t.ox-t.vh*math.sin(t.vw)"), set("t.vcz", "t.oz+t.vh*math.cos(t.vw)"),
       set("t.vcy", `t.oy-t.vd*math.sin(t.vp)*${num(PX)}`)]),
-    leg("t.rl", "rightleg", "r"), leg("t.ll", "leftleg", "l"),
+    leg("t.rl", "rightleg", "r"), leg("t.ll", "leftleg", "l"), upperFrames(),
     AX.map((a, k) => set("t.a" + a, `t.b${a}+t.g${k}2*(${num(ZMID)}+v.cwaz)`)),
     // Target anchors; step() moves the persistent top row toward them across substeps.
     Array.from({ length: COLS + 1 }, (_, c) => AX.map((a, k) => set(AN(c, a), `t.a${a}+t.g${k}0*${num(restX(c))}`))),
@@ -290,7 +313,7 @@ function material() {
       return [set('t.mass', cells.map(([rr,cc]) => `${attached(rr,cc)}*${num(W*H(rr)/4)}`).join('+')),
         set('v.cwchange', `v.cwchange+math.abs((${mass(i)}??0)-t.mass)`),
         set(`v.cn${key(i)}`, `(${mass(i)}??0)<0.001&&t.mass>=0.001`), set(mass(i), 't.mass')];
-    }), when('v.cwchange>0.001',set('v.cwqt',0)),
+    }), smoothWeights(), links.map(([a,b],i)=>[linkStrength(a,b)==='1'?[]:set('v.cl'+key(i),linkStrength(a,b)),isPinned(a)?[]:set('v.cd'+key(i),mass(a)+'+'+mass(b))]), when('v.cwchange>0.001',set('v.cwqt',0)),
   ])];
 }
 function linkStrength(a,b) {
@@ -298,16 +321,16 @@ function linkStrength(a,b) {
   const pair=ar===br?[attached(ar-1,ac),attached(ar,ac)]:[attached(ar,ac-1),attached(ar,ac)];
   return pair.includes('1')?'1':pair[0]==='0'?pair[1]:pair[1]==='0'?pair[0]:`math.max(${pair[0]},${pair[1]})`;
 }
-function constraint([a,b,len,stiffness=1]) {
-  const pinned=isPinned(a),strength=linkStrength(a,b),fixed=strength==='1';
+function constraint([a,b,len,stiffness=1],index) {
+  const pinned=isPinned(a),fixed=linkStrength(a,b)==='1',strength='v.cl'+key(index);
   const solve=[
     AX.map(x=>set('t.d'+x,P(b,x)+'-'+P(a,x))),
-    set('t.e','(1-'+num(len)+'/math.max(math.sqrt(t.dx*t.dx+t.dy*t.dy+t.dz*t.dz),0.0001))'+(fixed?'':'*t.link')+(stiffness===1?'':'*'+num(stiffness))),
-    pinned?[]:[set('t.ea','t.e*'+mass(b)+'/('+mass(a)+'+'+mass(b)+')'),set('t.e','t.e-t.ea')],
+    set('t.e','(1-'+num(len)+'/math.max(math.sqrt(t.dx*t.dx+t.dy*t.dy+t.dz*t.dz),0.0001))'+(fixed?'':'*'+strength)+(stiffness===1?'':'*'+num(stiffness))),
+    pinned?[]:[set('t.ea','t.e*'+mass(b)+'/v.cd'+key(index)),set('t.e','t.e-t.ea')],
     AX.map(x=>[pinned?[]:set(P(a,x),P(a,x)+'+t.d'+x+'*t.ea'),
       set(P(b,x),P(b,x)+'-t.d'+x+'*t.e')])
   ];
-  return fixed?solve:[set('t.link',strength),when('t.link>0.001',solve)];
+  return fixed?solve:when(strength+'>0.001',solve);
 }
 // A reappearing point starts below its attached neighbour with zero old velocity.
 // Hidden points only follow this frame, without gravity, collisions or constraints.
@@ -330,10 +353,14 @@ function schedule() {
 // The hem corners and centre stand for the whole cape's motion.
 const hemProbe = [pid(ROWS, 0), pid(ROWS, COLS >> 1), pid(ROWS, COLS)];
 const legSig = ["t.rd+t.rnz", "t.ld+t.lnz"];
+const upperPose = UPPER.flatMap((_,i)=>[...AX,...[0,1,2].flatMap(k=>[0,1,2].map(j=>`${k}${j}`))].map(k=>`u${i}${k}`));
 // Drift of the persistent top row from its anchors, plus leg movement since the last step.
 // Blocks, fluids and wind are compared with their values at the last step.
 const wake = () => [...pinnedIds.flatMap(c => AX.map(a => `math.abs(${P(c, a)}-${AN(c, a)})`)),
+  ...upperPose.map(k=>`math.abs(t.${k}-v.cw${k})`),
   `math.abs(${legSig[0]}-v.cwrs)`, `math.abs(${legSig[1]}-v.cwls)`, "math.abs(v.cwsg-v.cwss)",
+  // Moisture changes the air forces, but drying in still air need not wake the grid.
+  "math.abs(v.cwwet-v.cwwets)*v.cwsp*(1-v.cwwe)",
   "math.abs(v.cwnx-v.cwsx)", "math.abs(v.cwnz-v.cwsz)"].join("+") + `>${num(WAKE_EPS)}||v.cp_platform!=v.cq_platform||t.vn||v.cwht>0||v.cwchange>0.001||(v.cwbt>1&&v.cwbr>1.25&&v.cwbr<1.55)`;
 
 function step() {
@@ -341,49 +368,72 @@ function step() {
     // Velocity rescale for a changed step length; 0 right after a reset (v.cwh = 0).
     set("t.k", "v.cwh>0?math.clamp(t.h/v.cwh,0.5,2):0"), set("v.cwh", "t.h"),
     hemProbe.map(i => AX.map(a => set("t.w" + key(i) + a, P(i, a)))),
-    set("t.dm", `math.exp(-${num(DRAG)}*t.h)`), set("t.gh", `${num(GRAVITY)}*t.h*t.h`),
+    // Wet fabric catches less air and settles faster. Fluid drag/buoyancy retain
+    // their existing response; only the cape outside water/lava gets this damping.
+    set("t.moistResponse", "1-.9*v.cwwet*(1-v.cwwe)"),
+    set("t.moistAir", `${num(AIR)}*t.moistResponse`),
+    set("t.dm", `math.exp(-${num(DRAG)}*t.moistResponse*t.h)`), set("t.gh", `${num(GRAVITY)}*t.h*t.h`),
+    // Internal wet damping is relative to the wearer. Damping absolute world
+    // velocity would act as extra air drag and lift the wet cape MORE when running.
+    set('t.moistDamp','math.exp(-8*v.cwwet*(1-v.cwwe)*t.h)'),
+    AX.map(a=>set('t.moistCarry'+a,`(1-t.moistDamp)*v.cwv${a}*${num(PX)}*t.h`)),
     // One gentle outward pulse for shedding embers, applied to the shared grid.
     set("t.puff", "v.cwbt>1?math.sin(math.clamp((v.cwbr-1.25)/0.3,0,1)*180):0"),
     // A water current pushes the width together; out-of-phase column forces
     // buckle the tall upper cells while buoyancy compresses them from below.
     set("t.colphase", `v.cwwe?0:${num(32/COLS)}`),
-    set("t.fh", `(v.cwsp*${num(FLUTTER)}+100*t.puff)*t.h*t.h`), set("t.tp", "math.mod(q.life_time,40)*900"),
+    set("t.fh", `(v.cwsp*${num(FLUTTER)}*t.moistResponse+100*t.puff)*t.h*t.h`), set("t.tp", "math.mod(q.life_time,40)*900"),
     // Wind as a per-step displacement; fluid drag and the buoyancy-reduced gravity.
-    set("t.wx", `v.cwnx*${num(PX)}*t.h`), set("t.wz", `v.cwnz*${num(PX)}*t.h`),
+    set("t.wx", `v.cwnx*${num(PX)}*t.h*t.moistResponse`), set("t.wz", `v.cwnz*${num(PX)}*t.h*t.moistResponse`),
     set("t.fd", "math.pow(v.cwfd,t.h*60)"), set("t.gw", "v.cwfg*t.gh"),
     set("t.gh", `t.gh*(1-${num(HEAT_LIFT)}*v.cwht)`),  // hot air rising takes weight off the cape
     // A wave running from the shoulders to the hem, nearly in phase across a row.
-    free.map(({ i, r, c }) => set("t.fq" + key(i), `(math.sin(t.tp-${num(depth(r)*18.75)}-t.colphase*${c})+t.puff)*${num(depth(r)/16)}`)),
+    // Magnitude is constant over the substeps; reuse it for all three axes.
+    free.map(({ i, r, c }) => set("t.fq" + key(i), `t.fh*((math.sin(t.tp-${num(depth(r)*18.75)}-t.colphase*${c})+t.puff)*${num(depth(r)/16)})`)),
     set("t.j", 0),
     loop("t.n", [
       pinnedIds.map(c => AX.map(a => set(P(c, a), `${P(c, a)}+(${AN(c, a)}-${P(c, a)})/(t.n-t.j)`))), set("t.j", "t.j+1"),
       // Verlet step. Sim axes are world axes, so P-Q minus the wind step is the speed through
       // the air; the quadratic term 1/(1+AIR*|step|) is an implicit, always-stable air drag.
       // Below the fluid surface the drag and buoyancy replace it.
-      free.map(({ i }) => when(`${mass(i)}>0.001`, [set("t.wt", `${P(i, "y")}<v.cwfh`),
-        AX.map(a => set("t.v" + a, `(${P(i, a)}-${Q(i, a)})*t.k${a === "y" ? "" : "-t.w" + a}`)),
-        set("t.s", `t.wt?t.fd:t.dm/(1+${num(AIR)}*math.sqrt(t.vx*t.vx+t.vy*t.vy+t.vz*t.vz))`),
-        AX.map((a, k) => [set(Q(i, a), P(i, a)),
-          set(P(i, a), `${P(i, a)}+t.v${a}*t.s+t.fh*t.fq${key(i)}*t.g${k}2${a === "y" ? "-(t.wt?t.gw:t.gh)" : "+t.w" + a}`)])])),
-      set("t.k", 1),
-      free.map(({ i, r, c }) => {
-        const top = pid(0, c), max = num(depth(r) * STRETCH);
-        return when(`${mass(i)}>0.001`, [AX.map(a => set("t.d" + a, `${P(i, a)}-${P(top, a)}`)), set("t.e", "math.sqrt(t.dx*t.dx+t.dy*t.dy+t.dz*t.dz)"),
-          when(`t.e>${max}`, AX.map(a => set(P(i, a), `${P(top, a)}+t.d${a}*${max}/t.e`)))]);
-      }),
+      // Reuse contacts' scalar loop/dispatch. Integration and the anchor limit
+      // are independent per particle until the following link pass.
+      set('t.pi',0),loop(free.length,[
+        dispatch('t.pi',free,({i,r,c})=>[
+          set('t.pm',mass(i)),when('t.pm>0.001',[
+            AX.map(a=>[set('t.p'+a,P(i,a)),set('t.q'+a,Q(i,a)),set('t.a'+a,P(c,a))]),
+            set('t.pf','t.fq'+key(i)),set('t.pl',num(depth(r)*STRETCH)),
+          ]),
+        ]),
+        when('t.pm>0.001',[
+          set('t.wt','t.py<v.cwfh'),
+          AX.map(a=>set('t.v'+a,`(t.p${a}-t.q${a})*t.k${a==='y'?'':'-t.w'+a}`)),
+          set('t.s','t.wt?t.fd:t.dm/(1+t.moistAir*math.sqrt(t.vx*t.vx+t.vy*t.vy+t.vz*t.vz))'),
+          AX.map((a,k)=>[set('t.q'+a,'t.p'+a),set('t.p'+a,`t.p${a}+t.v${a}*t.s*t.moistDamp+t.pf*t.g${k}2${a==='y'?'-(t.wt?t.gw:t.gh)':'+t.w'+a+'*t.moistDamp'}+t.moistCarry${a}`)]),
+          AX.map(a=>set('t.d'+a,`t.p${a}-t.a${a}`)),
+          set('t.e','math.sqrt(t.dx*t.dx+t.dy*t.dy+t.dz*t.dz)'),
+          when('t.e>t.pl',AX.map(a=>set('t.p'+a,`t.a${a}+t.d${a}*t.pl/t.e`))),
+          dispatch('t.pi',free,({i})=>AX.map(a=>[set(P(i,a),'t.p'+a),set(Q(i,a),'t.q'+a)])),
+        ]),set('t.pi','t.pi+1'),
+      ]),set('t.k',1),
       // Collision inside the iteration loop so the links spread each push over the cloth.
       // Rows hanging beside the torso collide with the torso; rows below the hip only with
       // the legs (a tilted torso plane would sweep through them when sneaking). Each leg only
       // catches columns inside its shrunken width, so edge and centre columns hang free.
       // Lower rows pick by their current body-local height: once the hem has lifted above
       // the hip (running), legs swinging up to ±80° no longer kick it, only the torso holds it.
-      loop(ITER, [links.map(constraint), contacts()]),
+      // A hand can make a much larger local push than the torso plane.
+      // Spread that correction through the links before output, only on contact.
+      set('t.upperContact',0),set('t.iter',0),
+      loop(ITER+4,[when(`t.iter<${ITER}||t.upperContact`,[links.map(constraint),contacts()]),set('t.iter','t.iter+1')]),
     ]),
     // Sleep bookkeeping: hem motion per step this frame, and the leg pose it was taken in.
     set("t.mv", `(${hemProbe.map(i => AX.map(a => `math.abs(${P(i, a)}-t.w${key(i)}${a})`).join("+")).join("+")})/t.n`),
     set("v.cwqt", `t.mv<${num(SLEEP_EPS)}?v.cwqt+1:0`),
     set("v.cwrs", legSig[0]), set("v.cwls", legSig[1]),
-    set("v.cwss", "v.cwsg"), set("v.cq_platform", "v.cp_platform"), set("v.cwsx", "v.cwnx"), set("v.cwsz", "v.cwnz"),
+    upperPose.map(k=>set('v.cw'+k,'t.'+k)),
+    set("v.cwss", "v.cwsg"), set("v.cwwets", "v.cwwet"),
+    set("v.cq_platform", "v.cp_platform"), set("v.cwsx", "v.cwnx"), set("v.cwsz", "v.cwnz"),
   ];
 }
 // Rows CLAMP_ROW.. collide in one shared loop (the per-particle code would not fit): load the
@@ -399,9 +449,35 @@ function localPlane(normal,d,carry=false) {
     when('t.pd>0',[AX.map((a,k)=>[set('t.p'+a,`t.p${a}+${normal[k]}*t.pd`),
       carry ? set('t.q'+a,`t.q${a}+${normal[k]}*t.pd*${num(1-LEG_CARRY)}`) : []]),set('t.ch',1),carry?set('t.qh',1):[]])];
 }
+function upperContacts() {
+  // Reject points outside the union's bounding box before dispatching the limbs.
+  return when(AX.map(a=>`t.p${a}>t.upperlo${a}&&t.p${a}<t.upperhi${a}`).join('&&'),[set('t.ui',0),loop(UPPER.length,[
+    dispatch('t.ui',UPPER.map((_,i)=>i),i=>[
+      set('t.unear',AX.map(a=>`t.p${a}>t.u${i}lo${a}&&t.p${a}<t.u${i}hi${a}`).join('&&')),
+      when('t.unear',[
+        AX.map(a=>set('t.ud'+a,`t.p${a}-t.u${i}${a}`)),
+        [0,1,2].map(j=>set('t.ul'+j,AX.map((a,k)=>`t.u${i}${k}${j}*t.ud${a}`).join('+'))),
+        [0,1,2].map(j=>set('t.uh'+j,num(UPPER[i].half[j]+0.4))),
+      ]),
+    ]),
+    when('t.unear&&math.abs(t.ul0)<t.uh0&&math.abs(t.ul1)<t.uh1&&math.abs(t.ul2)<t.uh2',[
+      when('!t.qloaded',[dispatch('t.ci',colliders,i=>AX.map(a=>set('t.q'+a,Q(i,a)))),set('t.qloaded',1)]),
+      // The cape is attached behind the torso: eject it through the limb face
+      // facing that side, so a hand cannot squeeze it inward through the body.
+      dispatch('t.ui',UPPER.map((_,i)=>i),i=>[set('t.ua',`t.u${i}face`),set('t.usign',`t.u${i}sign`)]),
+      dispatch('t.ua',[0,1,2],j=>[
+        set('t.ud',`t.usign*t.uh${j}-t.ul${j}`),
+        dispatch('t.ui',UPPER.map((_,i)=>i),i=>AX.map((a,k)=>[
+          set('t.p'+a,`t.p${a}+t.u${i}${k}${j}*t.ud`),set('t.q'+a,`t.q${a}+t.u${i}${k}${j}*t.ud*${num(1-LEG_CARRY)}`),
+        ])),
+      ]),set('t.ch',1),set('t.qh',1),set('t.upperContact',1),
+    ]),set('t.ui','t.ui+1'),
+  ])]);
+}
 function contacts() {
   const px=num(PX),gap=num(WALL_GAP);
   return [set('t.ci',0),loop(colliders.length,[
+    set('t.qloaded','t.ci>=18||v.cwtb>0||v.cp_platform>0'),
     dispatch('t.ci',colliders,i=>[set('t.active',mass(i)),when('t.active>0.001',[AX.map(a=>set('t.p'+a,P(i,a))),when('t.ci>=18||v.cwtb>0||v.cp_platform>0',AX.map(a=>set('t.q'+a,Q(i,a))))])]),
     when('t.active>0.001',[
       set('t.ch',0),set('t.qh',0),
@@ -412,6 +488,7 @@ function contacts() {
         set('t.lx',`-5+math.mod(t.ci,${COLS+1})*${W}`),
         when(`math.abs(t.lx+1.9)<${LEG_HALF}`,localPlane(RLEG,'t.rd',true)),
         when(`math.abs(t.lx-1.9)<${LEG_HALF}`,localPlane(LLEG,'t.ld',true))]),
+      upperContacts(),
       when(`t.ci>=${(CLAMP_ROW-1)*(COLS+1)}`,[
         when('v.cwtb>0||v.cp_platform>0',[
           AX.map(a=>set('t.za'+a,`math.floor((t.p${a}-v.cwo${a})/${px})`)),
@@ -441,12 +518,17 @@ function contacts() {
 // Limit displacement to half a texture pixel. Missing/burning links contribute
 // no cross-gap smoothing, and unequal row heights retain affine/rest positions.
 export const MESH_FAIR = envNum('MESH_FAIR', 0.4), MESH_LIMIT = 0.5;
+function smoothWeights() {
+  return free.map(({i,r,c}) => {
+    const strength=(a,b,c) => 'math.min('+linkStrength(a,b)+','+linkStrength(b,c)+')*'+num(MESH_FAIR);
+    return [set('v.cf'+key(i)+'x',c>0&&c<COLS?strength(i-1,i,i+1):0),set('v.cf'+key(i)+'z',r<ROWS?strength(i-COLS-1,i,i+COLS+1):0)];
+  });
+}
 function toLocal(i) {
   const r=Math.floor(i/(COLS+1)), c=i%(COLS+1), left=i-1, right=i+1, up=i-COLS-1, down=i+COLS+1;
   const horizontal=c>0&&c<COLS, vertical=r<ROWS;
-  const strength=(a,b,c) => `math.min(${linkStrength(a,b)},${linkStrength(b,c)})*${num(MESH_FAIR)}`;
   return when(`(v.cu${key(i)}t??-1)!=v.cwst`, [
-    set('t.wx',horizontal?strength(left,i,right):0), set('t.wz',vertical?strength(up,i,down):0),
+    set('t.wx','v.cf'+key(i)+'x'), set('t.wz','v.cf'+key(i)+'z'),
     AX.map(a => set('t.s'+a,
       (horizontal?`((${P(left,a)}+${P(right,a)})*.5-${P(i,a)})*t.wx`:'0')+
       (vertical?`+((${P(up,a)}*${num(H(r))}+${P(down,a)}*${num(H(r-1))})/${num(H(r)+H(r-1))}-${P(i,a)})*t.wz`:''))),
@@ -467,7 +549,7 @@ function cell(r, c) {
     AX.map(a => set("t.m" + a, `(${cv(A, a)}+${cv(B, a)}+${cv(C, a)}+${cv(D, a)})*.25`)),
     AX.map(a => set("t.h" + a, `(${cv(B, a)}-${cv(A, a)}+${cv(D, a)}-${cv(C, a)})*${num(1 / (2 * W))}`)),
     AX.map(a => set("t.i" + a, `(${cv(A, a)}-${cv(C, a)}+${cv(B, a)}-${cv(D, a)})*${num(1 / (2 * H(r)))}`)),
-    r >= ROWS - BURN_ROWS ? [set(CV(r, c, "sz"), 1), when(burning, burnCell(r, c, H(r), CV(r, c, "sz")))] : [],
+    canBurn(r,c) ? [set(CV(r, c, "sz"), 1), when(burning, burnCell(r, c, H(r), CV(r, c, "sz")))] : [],
     set("t.la", "math.max(math.sqrt(t.hx*t.hx+t.hy*t.hy+t.hz*t.hz),0.0001)"),
     AX.map(a => set("t.f" + a, `t.h${a}/t.la`)),
     set("t.lb", "t.ix*t.fx+t.iy*t.fy+t.iz*t.fz"),
@@ -500,9 +582,19 @@ export function initDefaults() {
   return Object.fromEntries(names.sort().map(n => [n, n === "cwlt" ? -1 : n === "cwbr" ? BURN_END : 0]));
 }
 
-export const program = () => flat(
-  when("!(v.cwin??0)", [Object.entries(initDefaults()).map(([n, x]) => set("v." + n, x)), set("v.cwin", 1)]),
-  body());
+export const program = () => cacheConstants(flat(
+  when("!(v.cwin??0)", [Object.entries(initDefaults()).map(([n, x]) => set("v." + n, n.startsWith('cwwet') ? `(v.${n}??${x})` : x)), set("v.cwin", 1)]),
+  body()), ["0.001", "17.06667", "0.0001"]);
+
+// Actual water/rain exposure, independent of the cold-biome wind multiplier.
+// Run once per world frame (also while asleep): ~10 s to dry, ~3.3 s in heat.
+export const wetClock = () => set("v.cwwet", "math.clamp((v.cwwet??0)+(q.is_in_water?4:q.is_in_water_or_rain?.7:-(q.entity_biome_has_any_tags('desert','nether')?.3:.1))*math.clamp(q.delta_time,0,.1),0,1)");
+// The native root controller omits the cape animation in first person. Its cape
+// render controller can still update this scalar clock, without reading bones.
+// Both entries use the same stamp; render order and duplicate passes do not matter.
+export const wetUpdate = () => when("!q.is_in_ui&&!(v.is_paperdoll??0)",
+  when("q.life_time!=(v.cwwet_time??-1)", [wetClock(),set('v.cwwet_time','q.life_time')]));
+export const wetTint = "!q.is_in_ui&&!(v.is_paperdoll??0)?(v.cwwet??0)*.45:0";
 
 // UI and paperdoll use their geometry's locator offset and the rest pose.
 // Equipment queries require an actor and must stay inside the world-only branch.
@@ -511,6 +603,12 @@ function body() {
     set("v.cwaz", "q.get_root_locator_offset('armor_offset.default_neck',1)"),
     set("v.cwon", 0),
     when("!q.is_in_ui&&!(v.is_paperdoll??0)", [
+      // Moisture follows the actor even while first-person or an elytra hides the cape.
+      wetUpdate(),
+      // A&S guards queries with the animation clock. Skin/cape reloads can restart
+      // this clock without restarting the player lifetime or clearing variables.
+      when("q.anim_time<(v.cwclock??0)", [set("v.cwwu", 0), set("v.cwok", 0), set("v.cwlt", -1)]),
+      set("v.cwclock", "q.anim_time"),
       // A&S reaches chest slot 1 through its equipment controller. Our cape
       // animation also runs in actorless previews, so guard the call here.
       // The locator alone can stay zero while wearing armour; keep guaranteed
@@ -550,7 +648,7 @@ export function channels() {
   each((r, c) => {
     const n = boneNames(r, c), f = k => CV(r, c, k);
     // Reads here use ?? so a channel evaluated before the first anim_time_update cannot error.
-    const burnable = r >= ROWS - BURN_ROWS;
+    const burnable = canBurn(r,c);
     const refresh = burnable ? `||(${burning})&&(${f("ft")}??-1)!=q.life_time` : "";
     const nodes = flat(when(`(v.cwon??0)&&((${f("lt")}??-1)!=(v.cwst??-2)${refresh})`,
       [cell(r, c), set(f("lt"), "v.cwst"), burnable ? set(f("ft"), "q.life_time") : []]));
@@ -595,9 +693,9 @@ export const OVERLAP = envNum("OVERLAP", 0.75);
 // its bottom overlap as soon as the lower tile is gone, leaving an integer burn edge.
 export const TOP_OVERLAP = envNum('ROW_OVERLAP', 0.4);
 export function meshVariants(r,c) {
-  const masks = [0,1,2,3].filter(m => (c>0||!(m&1))&&(c<COLS-1||!(m&2)));
-  const list = masks.flatMap(code=>(r<ROWS-1?[0,8]:[0]).map(bottom=>({code:code+bottom,L:code&1?OVERLAP:0,R:code&2?OVERLAP:0,T:r>0?TOP_OVERLAP:0,B:bottom?TOP_OVERLAP:0})));
-  if(r>0) list.push({code:4,L:0,R:0,T:0,B:0});
+  const masks = [0,1,2,3].filter(m => (c>0||!(m&1))&&(c<COLS-1||!(m&2))&&(c===0||canBurn(r,c-1)||!!(m&1))&&(c===COLS-1||canBurn(r,c+1)||!!(m&2)));
+  const list = masks.flatMap(code=>(r<ROWS-1?(canBurn(r+1,c)?[0,8]:[8]):[0]).map(bottom=>({code:code+bottom,L:code&1?OVERLAP:0,R:code&2?OVERLAP:0,T:r>0?TOP_OVERLAP:0,B:bottom?TOP_OVERLAP:0})));
+  if(canBurn(r,c)) list.push({code:4,L:0,R:0,T:0,B:0});
   return list;
 }
 export function geometry() {
@@ -630,7 +728,8 @@ export function renderController() {
   });
   return {format_version:'1.8.0',render_controllers:{'controller.render.player.cape':{
     rebuild_animation_matrices:true,geometry:'Geometry.cape',materials:[{'*':'Material.cape'}],textures:['Texture.cape'],
-    part_visibility:[visibility],is_hurt_color:{r:0,g:0,b:0,a:0}
+    part_visibility:[visibility],is_hurt_color:{r:0,g:0,b:0,a:0},
+    overlay_color:{r:0,g:0,b:0,a:toMolang([wetUpdate()])+`return ${wetTint};`}
   }}};
 }
-export const sections = () => ({ origin: origin(), frame: frame(), reset: reset(), step: step(), cell: cell(1, 1) });
+export const sections = () => ({ upper: upperFrames(), upperContacts: upperContacts(), weights: smoothWeights(), origin: origin(), frame: frame(), reset: reset(), step: step(), cell: cell(1, 1) });

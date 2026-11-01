@@ -1,3 +1,4 @@
+import { upperBone } from './test-player.mjs';
 // Exercise passenger position timing independently of the animation clock.
 // Optional CLOTH_BASELINE points at a pre-change generator for motion comparisons.
 import assert from 'node:assert/strict';
@@ -28,9 +29,9 @@ function run({ fps=60, speed=5.6, period=.05, phase=0, ride=true, stop=false, sw
       64+(bob?.15*Math.sin(sampled*4):0),.5+(corner?speed*2+radius*Math.sin(rad):travel)+(teleport&&time>=4?100:0)];
     const leg=(x,y) => ({t:{x,y:12,z:0},r:{x:riding?-81:0,y:riding?y:0,z:0}});
     const bones={body:{t:{x:0,y:24,z:0},r:{x:0,y:0,z:0}},rightleg:leg(-1.9,18),leftleg:leg(1.9,-18)};
-    const q={life_time:()=>time,delta_time:()=>1/fps,frame_alpha:()=>time*20-tick,
+    const q={anim_time:()=>Math.min(time,.5),life_time:()=>time,delta_time:()=>1/fps,frame_alpha:()=>time*20-tick,
       position:k=>pos[k]+(k===1?1.62:0),body_y_rotation:()=>angle,is_riding:()=>+riding,
-      bone_orientation_trs:n=>bones[n],get_root_locator_offset:()=>0,has_armor_slot:()=>0,has_cape:()=>1,
+      bone_orientation_trs:n=>bones[n]??upperBone(n),get_root_locator_offset:()=>0,has_armor_slot:()=>0,has_cape:()=>1,
       is_in_ui:()=>0,is_spectator:()=>0,is_item_name_any:()=>0,is_on_ground:()=>0,
       time_stamp:()=>tick,time_of_day:()=>.25,is_in_water:()=>+fluid,is_in_lava:()=>0,
       is_in_water_or_rain:()=>+fluid,entity_biome_has_any_tags:()=>0,is_on_fire:()=>0,

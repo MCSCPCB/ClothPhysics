@@ -1,3 +1,4 @@
+import { upperBone } from './test-player.mjs';
 // Structural/trajectory checks for the generated burn expressions. This executes
 // the same Molang statement trees as the pack, with independent coordinate math.
 import assert from 'node:assert/strict';
@@ -195,9 +196,9 @@ const visibility=Object.entries(rawRender.render_controllers['controller.render.
 let fullMass=0,leastMass=Infinity,detachedChecked=false;
 const materialMass=state=>Object.entries(state).filter(([k])=>/^cm[0-9a-z]$/.test(k)).reduce((sum,[,m])=>sum+m,0);
 const q = {
-  armor_texture_slot:()=>0, life_time: () => s.t, delta_time: () => 1 / 60, frame_alpha: () => (s.t * 20) % 1,
+  armor_texture_slot:()=>0, anim_time: () => Math.min(s.t,.5), life_time: () => s.t, delta_time: () => 1 / 60, frame_alpha: () => (s.t * 20) % 1,
   position: k => [0.5, 65.62, 0.5][k], body_y_rotation: () => s.t * 67, is_riding: () => 0,
-  bone_orientation_trs: n => ({ t: { x: n === 'leftleg' ? 1.9 : n === 'rightleg' ? -1.9 : 0, y: n === 'body' ? 24 : 12, z: 0 }, r: { x: 0, y: 0, z: 0 } }),
+  bone_orientation_trs: n => ['head','rightarm','leftarm'].includes(n) ? upperBone(n) : ({ t: { x: n === 'leftleg' ? 1.9 : n === 'rightleg' ? -1.9 : 0, y: n === 'body' ? 24 : 12, z: 0 }, r: { x: 0, y: 0, z: 0 } }),
   get_root_locator_offset: () => 0, has_armor_slot: () => 0, has_cape: () => 1, is_in_ui: () => +s.ui, is_spectator: () => 0,
   is_item_name_any: () => 0, is_on_ground: () => 1, is_on_fire: () => +s.fire,
   time_stamp: () => Math.floor(s.t * 20), time_of_day: () => 0.25,
@@ -265,8 +266,8 @@ for (let frame = 0; frame < 30 * 60; frame++) {
 }
 assert.equal(tiles.filter(({ r, c }) => value(v, r, c, 's') !== 0).length, 0);
 assert.ok(detachedChecked&&leastMass<fullMass*.5);
-console.log({fullMass,leastMass,exportLength:packed.encode(rawText).length});
+console.log({fullMass,leastMass,exportLength:packed.expression(rawText).length});
 const raw=toMolang(program())+'return 0;', packTexts=[raw,JSON.stringify(bones()),JSON.stringify(renderController())];
-assert.ok(compactNames(packTexts).encode(raw).length <= 61500);
+assert.ok(compactNames(packTexts).expression(raw).length <= 61500);
 console.log('PASS: burn frontier, pinned edges, world-space ashes, overshoot, repeat ignition, UI and channel order');
 console.table(timing);

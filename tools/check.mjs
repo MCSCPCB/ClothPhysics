@@ -1,8 +1,9 @@
+import { upperBone } from './test-player.mjs';
 // Runs the generated Molang (printed as JS) against a scripted player and reports
 // seams, parallelogram fit, stretch, lift and UI isolation. It verifies our own math
 // and logic only; Bedrock's real transform conventions still need the in-game test.
 import assert from "node:assert/strict";
-import { program, channels, initDefaults, pid, restX, restY, COLS, ROWS, W, H, ZMID, OVERLAP, TOP_OVERLAP, MESH_LIMIT, bones, renderController, CLAMP_ROW } from "./cloth.mjs";
+import { program, sections, channels, initDefaults, pid, restX, restY, COLS, ROWS, W, H, ZMID, OVERLAP, TOP_OVERLAP, MESH_LIMIT, bones, renderController, CLAMP_ROW } from "./cloth.mjs";
 import { toMolang, compileJs, jsReturn, MATH, strict, checkMolang, compactNames } from "./molang.mjs";
 import { burnVar } from './burn.mjs';
 
@@ -80,8 +81,8 @@ function query(s) {
   };
   return {
     // q.position(1) is the player's eye, 1.62 above the feet, as in game.
-    life_time: () => s.time, delta_time: () => s.dt, frame_alpha: () => s.alpha, position: k => s.pos[k] + (k === 1 ? 1.62 : 0),
-    body_y_rotation: () => s.yaw, is_riding: () => 0, bone_orientation_trs: name => s.bones[name], get_root_locator_offset: () => s.armorZ,
+    anim_time: () => s.animTime ?? Math.min(s.time,.5), life_time: () => s.time, delta_time: () => s.dt, frame_alpha: () => s.alpha, position: k => s.pos[k] + (k === 1 ? 1.62 : 0),
+    body_y_rotation: () => s.yaw, is_riding: () => 0, bone_orientation_trs: name => s.bones[name] ?? upperBone(name), get_root_locator_offset: () => s.armorZ,
     has_armor_slot: slot => {
       assert.ok(!s.ui && !s.noEntity, 'query.has_armor_slot requires entity context');
       return +(slot === 1 && (s.chestplate ?? s.armorZ > 0));
@@ -100,7 +101,9 @@ function query(s) {
 }
 
 // Evaluate every channel in a random order; returns {"r,c": cell fields}.
+const prepareWeights = compileJs(sections().weights);
 function evalChannels(v, q) {
+  if (v.__opt('cwon') && !v.__opt('cwok')) prepareWeights(v,q,MATH);
   const order = chans.map(ch => [Math.random(), ch]).sort((a, b) => a[0] - b[0]).map(x => x[1]);
   const cells = {};
   for (const ch of order) (cells[`${ch.r},${ch.c}`] ??= {})[ch.field] = ch.fn(v, q, MATH);
@@ -110,6 +113,7 @@ function evalChannels(v, q) {
 function affineTest() {
   const M = [[1.1, 0.35, 0.2], [-0.15, 0.85, 0.3], [0.25, -0.2, 0.95]], pv = [0, 24, ZMID];
   const v = strict({ ...initDefaults(), cwin: 1, cwon: 1, cwlt: 1, cwst: 1, cwaz: 0 }), q = query({ ui: 0 });
+  for (let r=1;r<ROWS;r++) for(let c=0;c<COLS;c++) v['ct'+key(r*COLS+c)]=1;
   for (let r = 1; r <= ROWS; r++) for (let c = 0; c <= COLS; c++) {
     const p = mul(M, sub(corner(r, c), pv)).map((x, k) => x + pv[k]);
     ["x", "y", "z"].forEach((a, k) => v[`cu${key(pid(r, c))}${a}`] = p[k]);
@@ -530,7 +534,7 @@ function reloadTest() {
       let ready = true, reads = 0;
       q.bone_orientation_trs = name => {
         assert.ok(ready, `queried ${name} before reloaded geometry was ready (${fps} fps)`);
-        reads++; return s.bones[name];
+        reads++; return s.bones[name] ?? upperBone(name);
       };
       for (let f = 0; f < fps / 2; f++) { s.time = 100 + f / fps; prog(v, q, MATH); }
       assert.ok(v.cwok && reads > 0, 'physics running before reload');
@@ -563,7 +567,7 @@ function reloadTest() {
   } catch (e) { return e.message; }
 }
 
-const rawUpdate=toMolang(program())+'return 0;', exportedUpdate=compactNames([rawUpdate,JSON.stringify(bones()),JSON.stringify(renderController())]).encode(rawUpdate);
+const rawUpdate=toMolang(program())+'return 0;', exportedUpdate=compactNames([rawUpdate,JSON.stringify(bones()),JSON.stringify(renderController())]).expression(rawUpdate);
 console.log(`anim_time_update ${exportedUpdate.length} chars (limit 61500)`);
 check('expression fits limit',exportedUpdate.length,exportedUpdate.length<=61500);
 check("fresh instance / UI only", freshTest(), freshTest() === "ok");
@@ -616,7 +620,7 @@ console.log("environment");
 check("outdoor wind > 0.3 b/s", fmt(env["outdoor stand"].wind), env["outdoor stand"].wind > 0.3);
 check("outdoor stays awake", fmt(env["outdoor stand"].sleep), env["outdoor stand"].sleep < 0.1);
 check("rain wind / calm", fmt(env["rain stand"].wind / env["outdoor stand"].wind), env["rain stand"].wind > 1.5 * env["outdoor stand"].wind);
-check("rain hem offset > calm", `${fmt(env["rain stand"].deflect)} > ${fmt(env["outdoor stand"].deflect)}`, env["rain stand"].deflect > env["outdoor stand"].deflect);
+check("wet cape hangs closer despite stronger rain wind", `${fmt(env["rain stand"].deflect)} < ${fmt(env["outdoor stand"].deflect)}`, env["rain stand"].deflect < env["outdoor stand"].deflect);
 check("corridor wind / open", fmt(env["corridor stand"].wind / env["outdoor stand"].wind), env["corridor stand"].wind > 1.4 * env["outdoor stand"].wind);
 check("wall upwind shelters", fmt(env["sheltered stand"].wind / env["outdoor stand"].wind), env["sheltered stand"].wind < 0.5 * env["outdoor stand"].wind);
 check("roofed room is calm", fmt(env["roofed stand"].wind), env["roofed stand"].wind === 0 && env["roofed stand"].sleep > 0.5);
