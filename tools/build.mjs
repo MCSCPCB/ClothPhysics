@@ -4,7 +4,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { program, bones, geometry, renderController } from "./cloth.mjs";
-import { toMolang, checkMolang } from "./molang.mjs";
+import { toMolang, checkMolang, compactNames } from "./molang.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const src = path.join(root, "src"), LIMIT = 61500;
@@ -14,11 +14,17 @@ const write = (rel, data) => {
   fs.writeFileSync(file, typeof data === "string" ? data : JSON.stringify(data, null, 1) + "\n");
 };
 
-// Every expression is checked for Molang argument counts before anything is written.
-const update = checkMolang(toMolang(program()) + "return 0;", "anim_time_update");
-for (const [b, ch] of Object.entries(bones())) for (const [c, vals] of Object.entries(ch)) vals.forEach((x, i) => checkMolang(String(x), `${b}.${c}[${i}]`));
+// Validate Bedrock grammar and argument counts before writing any pack files.
+const rawUpdate = toMolang(program()) + "return 0;", rawBones = bones(), rawRender = renderController();
+const { encode } = compactNames([rawUpdate, JSON.stringify(rawBones), JSON.stringify(rawRender)]);
+const builtBones = JSON.parse(encode(JSON.stringify(rawBones))), builtRender = JSON.parse(encode(JSON.stringify(rawRender)));
+const update = checkMolang(encode(rawUpdate), "anim_time_update");
+for (const [b, ch] of Object.entries(builtBones)) for (const [c, vals] of Object.entries(ch)) vals.forEach((x, i) => checkMolang(String(x), `${b}.${c}[${i}]`));
+for (const [controller, config] of Object.entries(builtRender.render_controllers))
+  for (const part of config.part_visibility)
+    for (const [bone, expression] of Object.entries(part)) checkMolang(expression, `${controller}.${bone}`);
 if (update.length > LIMIT) throw new Error(`anim_time_update is ${update.length} chars, over ${LIMIT}`);
-const channelMax = Math.max(...Object.values(bones()).flatMap(b => Object.values(b).flat()).map(e => String(e).length));
+const channelMax = Math.max(...Object.values(builtBones).flatMap(b => Object.values(b).flat()).map(e => String(e).length));
 if (channelMax > LIMIT) throw new Error(`a bone channel is ${channelMax} chars, over ${LIMIT}`);
 
 // Keep UUIDs stable across rebuilds so the game treats it as the same pack.
@@ -30,8 +36,8 @@ write("manifest.json", {
   modules: [{ type: "resources", uuid: old?.modules[0].uuid ?? crypto.randomUUID(), version: "0.2.0" }],
 });
 write("animations/cloth_cape.animation.json", { format_version: "1.8.0", animations: { "animation.player.cape": {
-  loop: true, animation_length: 1, anim_time_update: update, bones: bones() } } });
+  loop: true, animation_length: 1, anim_time_update: update, bones: builtBones } } });
 write("models/entity/cloth_cape.geo.json", geometry());
-write("render_controllers/cloth_cape.render_controllers.json", renderController());
+write("render_controllers/cloth_cape.render_controllers.json", builtRender);
 fs.copyFileSync(path.join(root, "_sample", "pack_icon.png"), path.join(src, "pack_icon.png"));
 console.log(`src written: anim_time_update ${update.length} chars, largest channel ${channelMax} chars`);

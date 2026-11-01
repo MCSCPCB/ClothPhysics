@@ -5,9 +5,10 @@
 // G = Y*R maps body-local offsets into sim. R is the animated body rotation from
 // q.bone_orientation_trs; Y is the yaw and z flip used by Simple Ragdoll's boneOutput.
 import { set, when, loop, flat, num, toMolang } from "./molang.mjs";
-import { BURN_ROWS, burnClock, burnCell, burnVar, burning } from "./burn.mjs";
+import { BURN_ROWS, BURN_END, burnClock, burnCell, burnVar, burning } from "./burn.mjs";
 
-export const COLS = 4, ROWS = 6, W = 10 / COLS, H = 16 / ROWS;
+import { COLS, ROWS, W, H, depth, pid, restX, restY, tiles } from "./grid.mjs";
+export { COLS, ROWS, W, H, pid, restX, restY } from "./grid.mjs";
 export const ZMID = 2.5;                 // cape mid-plane at rest (cube z 2..3)
 const PX = 16 / 0.9375;                  // model pixels per block at the vanilla player scale
 const MARGIN = 0.5, HIP_Y = 12;          // half thickness; legs only push rows below the hip
@@ -34,15 +35,15 @@ const SOLID = "'minecraft:is_axe_item_destructible','minecraft:is_hoe_item_destr
 const WALL_GAP = 0.5, VIEWER_R = 0.35, VIEWER_H = 1.8;
 export const CLAMP_ROW = envNum("CLAMP_ROW", 2); // rows from here down collide with terrain (row 1 sits on the back)
 // Wind, blocks per second. Base speed drifts over minutes; gusts come every few seconds and
-// grow in rain; WIND_CALM is the dead zone that lets the cape sleep indoors.
+// grow in rain and cold biomes; WIND_CALM is the dead zone for sheltered cloth.
 // Halved after the first in-game test: everyday wind should only just lift a cape facing
 // into it, and rain at 1.0 blew it flat.
-const WIND = envNum("WIND", 0.5), WIND_RAIN = 2.5, WIND_SNOW = 1.3, WIND_CALM = 0.15, AIR_MAX = 6;
+const WIND = envNum("WIND", 0.5), WIND_RAIN = 2.5, WIND_CALM = 0.15, AIR_MAX = 6;
 // Fluids: velocity kept per 60 Hz step and the share of gravity left after buoyancy.
 // Fire: the heat (0..1) takes HEAT_LIFT of the weight off the cape and makes it billow (sweep:
 // lift above 1 flips the cape over the head, flutter 4 opens 2 px seams; 1 and 2 lift the hem
 // about 6 px with 0.8 px seams). Burning tiles are animated in burn.mjs; hidden
-// rows keep their original particles, weight and constraints.
+// rows are removed from collision and load-bearing constraints.
 const HEAT_LIFT = envNum("HEAT_LIFT", 1), HEAT_FLUTTER = envNum("HEAT_FLUTTER", 2);
 const WATER_DRAG = envNum("WATER_DRAG", 0.8), WATER_G = envNum("WATER_G", -0.05), LAVA_DRAG = 0.6, LAVA_G = 0.05;
 
@@ -50,8 +51,6 @@ const NP = (ROWS + 1) * (COLS + 1);
 if (NP > 36 || ROWS * COLS > 36) throw new Error("grid too large for one-character keys");
 const key = i => i.toString(36);
 const AX = ["x", "y", "z"];
-export const pid = (r, c) => r * (COLS + 1) + c;
-export const restX = c => -5 + c * W, restY = r => 24 - r * H;
 const isPinned = i => i <= COLS;
 // v.cp/v.cq: particle position and previous position (sim). v.cu: body-local position,
 // persisted so bone channels can read it after anim_time_update. v.cc: per-cell outputs.
@@ -63,7 +62,7 @@ for (let r = 1; r <= ROWS; r++) for (let c = 0; c <= COLS; c++) free.push({ i: p
 const links = [];
 for (let r = 0; r <= ROWS; r++) for (let c = 0; c <= COLS; c++) {
   if (c < COLS && r > 0) links.push([pid(r, c), pid(r, c + 1), W]);
-  if (r < ROWS) links.push([pid(r, c), pid(r + 1, c), H]);
+  if (r < ROWS) links.push([pid(r, c), pid(r + 1, c), H(r)]);
   if (BEND > 0 && r > 0 && c + 2 <= COLS) links.push([pid(r, c), pid(r, c + 2), 2 * W, BEND]);
 }
 
@@ -78,7 +77,6 @@ const R = [
 // Model vector -> world axes (physical z flip, then yaw), as Simple Ragdoll's activate().
 const yawMap = (x, y, z) => [`t.cy*${x}+t.sy*${z}`, y, `t.sy*${x}-t.cy*${z}`];
 const simPoint = (out, s) => yawMap(`${s}.t.x`, `${s}.t.y`, `${s}.t.z`).map((e, k) => set(out + AX[k], `t.o${AX[k]}+${e}`));
-const dot = (n, i) => `${n[0]}*${P(i, "x")}+${n[1]}*${P(i, "y")}+${n[2]}*${P(i, "z")}`;
 const TORSO = ["t.g02", "t.g12", "t.g22"], RLEG = ["t.rnx", "t.rny", "t.rnz"], LLEG = ["t.lnx", "t.lny", "t.lnz"];
 // Interpolate the tick-stepped actor position, as Simple Ragdoll's anchorPrograms(). A
 // player's q.position(1) is the eye, 1.62 above the feet (VanillaRagdoll's player rig
@@ -169,7 +167,8 @@ function env() {
 }
 
 // World wind from the level clock, so every client sees the same direction. Per tick:
-// weather sets the strength (rain = wet but not in water; snow = rain in a cold biome),
+// Cold biomes always use the rain strength, without relying on snow counting as rain.
+// Other biomes use the rain query. Both share the same gradual strength transition;
 // then the blocks around the player shape it: a wall upwind shelters, walls on both sides
 // of a gap channel it along the gap, a roof keeps only a corridor's draft, height adds.
 function wind() {
@@ -178,9 +177,9 @@ function wind() {
     when("t.tk", [
       set("t.ts", "math.mod(q.time_stamp,1000000)"),
       set("t.wa", `t.ts*0.041+${sin("t.ts*0.023")}*120`),
-      set("v.cwrn", `math.clamp(v.cwrn+((q.is_in_water_or_rain&&!q.is_in_water)?0.05:-0.003),0,1)`),
+      set("v.cwrn", `math.clamp(v.cwrn+(((q.entity_biome_has_any_tags('cold','frozen')||q.is_in_water_or_rain)&&!q.is_in_water)?0.05:-0.003),0,1)`),
       set("t.ws", `${num(WIND)}*(0.9+0.5*${sin("t.ts*0.07")}+math.max(${sin("t.ts*1.9")}*${sin("t.ts*0.67")},0)*(0.8+1.6*v.cwrn))` +
-        `*(1+${num(WIND_RAIN - 1)}*v.cwrn*(q.entity_biome_has_any_tags('cold','frozen')?${num(WIND_SNOW)}:1))`),
+        `*(1+${num(WIND_RAIN - 1)}*v.cwrn)`),
       set("t.ux", cos("t.wa")), set("t.uz", sin("t.wa")),
       // Sea and land breezes: by water the wind turns round between day and night and drops
       // at dawn and dusk; deserts blow hardest in the afternoon, other land a little by day.
@@ -235,25 +234,50 @@ const pinnedIds = Array.from({ length: COLS + 1 }, (_, c) => c);
 
 const reset = () => [pinnedIds.map(c => AX.map(a => set(P(c, a), AN(c, a)))),
   // Previous positions are not reset: v.cwh = 0 makes the next step use zero velocity.
-  free.map(({ i, r, c }) => AX.map((a, k) => set(P(i, a), `${P(c, a)}-t.g${k}1*${num(r * H)}`)))];
+  free.map(({ i, r, c }) => AX.map((a, k) => set(P(i, a), `${P(c, a)}-t.g${k}1*${num(depth(r))}`)))];
 
-// Back-face half-spaces: anything in front of the torso or leg back face is pushed
-// behind it. Self-healing: a cape that swings through the body in a fast turn always
-// returns to the back. Box or slab tests let the cloth snag across the body (tried).
-const plane = (i, n, d) => [set("t.pd", `${d}-(${dot(n, i)})`),
-  when("t.pd>0", AX.map((a, k) => set(P(i, a), `${P(i, a)}+${n[k]}*t.pd`)))];
-const torso = i => plane(i, TORSO, "t.td");
-// Legs push the cape out but only hand on LEG_CARRY of their own speed (the previous
-// position moves with the rest of the push), so a swinging leg no longer drags the hem.
-const legPlane = (i, n, d) => [set("t.pd", `${d}-(${dot(n, i)})`),
-  when("t.pd>0", AX.map((a, k) => [set(P(i, a), `${P(i, a)}+${n[k]}*t.pd`), set(Q(i, a), `${Q(i, a)}+${n[k]}*t.pd*${num(1 - LEG_CARRY)}`)]))];
-
-function constraint([a, b, len, stiff = 1]) {
-  const pin = isPinned(a), w = (pin ? 1 : 0.5) * stiff;
-  return [AX.map(x => set("t.d" + x, `${P(b, x)}-${P(a, x)}`)),
-    // (|d| - len) / |d|, written as one statement to save characters.
-    set("t.e", `(1-${num(len)}/math.max(math.sqrt(t.dx*t.dx+t.dy*t.dy+t.dz*t.dz),0.0001))${w === 1 ? "" : "*" + num(w)}`),
-    AX.map(x => [pin ? [] : set(P(a, x), `${P(a, x)}+t.d${x}*t.e`), set(P(b, x), `${P(b, x)}-t.d${x}*t.e`)])];
+// Snapshot tile attachment before solving, independent of bone channel order.
+const attached = (r, c) => r < 0 || r >= ROWS || c < 0 || c >= COLS ? '0' : r === 0 ? '1' : `v.ct${key(r * COLS + c)}`;
+// Fixed shoulders and out-of-grid neighbours are constants. Molang only allows
+// a variable on the left of ??, so fold those visibility bits at generation time.
+const attachmentBit = (r, c, bit) => {
+  const value = attached(r, c);
+  return value === '0' ? '0' : value === '1' ? String(bit) : `(${value}??1)>0.99?${bit}:0`;
+};
+const mass = i => `v.cm${key(i)}`;
+function material() {
+  return [set('v.cwchange', 0), when('t.sr||v.cwdirty', [
+    set('v.cwdirty',0), tiles.filter(({ r }) => r > 0).map(({ r, c }) => set(attached(r, c), `(${burnVar(r,c,'attach')}??1)`)),
+    free.map(({ i, r, c }) => {
+      const cells = [[r-1,c-1],[r-1,c],[r,c-1],[r,c]].filter(([rr,cc]) => rr >= 0 && rr < ROWS && cc >= 0 && cc < COLS);
+      return [set('t.mass', cells.map(([rr,cc]) => `${attached(rr,cc)}*${num(W*H(rr)/4)}`).join('+')),
+        set('v.cwchange', `v.cwchange+math.abs((${mass(i)}??0)-t.mass)`),
+        set(`v.cn${key(i)}`, `(${mass(i)}??0)<0.001&&t.mass>=0.001`), set(mass(i), 't.mass')];
+    }), when('v.cwchange>0.001',set('v.cwqt',0)),
+  ])];
+}
+function linkStrength(a,b) {
+  const ar=Math.floor(a/(COLS+1)), ac=a%(COLS+1), br=Math.floor(b/(COLS+1));
+  const pair=ar===br?[attached(ar-1,ac),attached(ar,ac)]:[attached(ar,ac-1),attached(ar,ac)];
+  return pair.includes('1')?'1':pair[0]==='0'?pair[1]:pair[1]==='0'?pair[0]:`math.max(${pair[0]},${pair[1]})`;
+}
+function constraint([a,b,len,stiffness=1]) {
+  const pinned=isPinned(a),strength=linkStrength(a,b),fixed=strength==='1';
+  const solve=[
+    AX.map(x=>set('t.d'+x,P(b,x)+'-'+P(a,x))),
+    set('t.e','(1-'+num(len)+'/math.max(math.sqrt(t.dx*t.dx+t.dy*t.dy+t.dz*t.dz),0.0001))'+(fixed?'':'*t.link')+(stiffness===1?'':'*'+num(stiffness))),
+    pinned?[]:[set('t.ea','t.e*'+mass(b)+'/('+mass(a)+'+'+mass(b)+')'),set('t.e','t.e-t.ea')],
+    AX.map(x=>[pinned?[]:set(P(a,x),P(a,x)+'+t.d'+x+'*t.ea'),
+      set(P(b,x),P(b,x)+'-t.d'+x+'*t.e')])
+  ];
+  return fixed?solve:[set('t.link',strength),when('t.link>0.001',solve)];
+}
+// A reappearing point starts below its attached neighbour with zero old velocity.
+// Hidden points only follow this frame, without gravity, collisions or constraints.
+function seedDetached() {
+  return free.map(({i,r,c}) => when(`v.cn${key(i)}||${mass(i)}<0.001`, [
+    AX.map((a,k) => [set(P(i,a), `${P(pid(r-1,c),a)}-t.g${k}1*${num(H(r-1))}`),set(Q(i,a),P(i,a))]),
+    set(`v.cn${key(i)}`,0)]));
 }
 
 // About 60 steps a second from an accumulator: at high frame rates a step runs once 3/4 of
@@ -273,7 +297,7 @@ const legSig = ["t.rd+t.rnz", "t.ld+t.lnz"];
 // Blocks, fluids and wind are compared with their values at the last step.
 const wake = () => [...pinnedIds.flatMap(c => AX.map(a => `math.abs(${P(c, a)}-${AN(c, a)})`)),
   `math.abs(${legSig[0]}-v.cwrs)`, `math.abs(${legSig[1]}-v.cwls)`, "math.abs(v.cwsg-v.cwss)",
-  "math.abs(v.cwnx-v.cwsx)", "math.abs(v.cwnz-v.cwsz)"].join("+") + `>${num(WAKE_EPS)}||v.cp_platform!=v.cq_platform||t.vn||v.cwht>0||(v.cwbt>1&&v.cwbr>1.25&&v.cwbr<1.55)`;
+  "math.abs(v.cwnx-v.cwsx)", "math.abs(v.cwnz-v.cwsz)"].join("+") + `>${num(WAKE_EPS)}||v.cp_platform!=v.cq_platform||t.vn||v.cwht>0||v.cwchange>0.001||(v.cwbt>1&&v.cwbr>1.25&&v.cwbr<1.55)`;
 
 function step() {
   return [
@@ -283,29 +307,32 @@ function step() {
     set("t.dm", `math.exp(-${num(DRAG)}*t.h)`), set("t.gh", `${num(GRAVITY)}*t.h*t.h`),
     // One gentle outward pulse for shedding embers, applied to the shared grid.
     set("t.puff", "v.cwbt>1?math.sin(math.clamp((v.cwbr-1.25)/0.3,0,1)*180):0"),
+    // A water current pushes the width together; out-of-phase column forces
+    // buckle the tall upper cells while buoyancy compresses them from below.
+    set("t.colphase", `v.cwwe?0:${num(32/COLS)}`),
     set("t.fh", `(v.cwsp*${num(FLUTTER)}+100*t.puff)*t.h*t.h`), set("t.tp", "math.mod(q.life_time,40)*900"),
     // Wind as a per-step displacement; fluid drag and the buoyancy-reduced gravity.
     set("t.wx", `v.cwnx*${num(PX)}*t.h`), set("t.wz", `v.cwnz*${num(PX)}*t.h`),
     set("t.fd", "math.pow(v.cwfd,t.h*60)"), set("t.gw", "v.cwfg*t.gh"),
     set("t.gh", `t.gh*(1-${num(HEAT_LIFT)}*v.cwht)`),  // hot air rising takes weight off the cape
     // A wave running from the shoulders to the hem, nearly in phase across a row.
-    free.map(({ i, r, c }) => set("t.fq" + key(i), `(math.sin(t.tp-${r * 50 + c * 8})+t.puff)*${num(r / ROWS)}`)),
+    free.map(({ i, r, c }) => set("t.fq" + key(i), `(math.sin(t.tp-${num(depth(r)*18.75)}-t.colphase*${c})+t.puff)*${num(depth(r)/16)}`)),
     set("t.j", 0),
     loop("t.n", [
       pinnedIds.map(c => AX.map(a => set(P(c, a), `${P(c, a)}+(${AN(c, a)}-${P(c, a)})/(t.n-t.j)`))), set("t.j", "t.j+1"),
       // Verlet step. Sim axes are world axes, so P-Q minus the wind step is the speed through
       // the air; the quadratic term 1/(1+AIR*|step|) is an implicit, always-stable air drag.
       // Below the fluid surface the drag and buoyancy replace it.
-      free.map(({ i }) => [set("t.wt", `${P(i, "y")}<v.cwfh`),
+      free.map(({ i }) => when(`${mass(i)}>0.001`, [set("t.wt", `${P(i, "y")}<v.cwfh`),
         AX.map(a => set("t.v" + a, `(${P(i, a)}-${Q(i, a)})*t.k${a === "y" ? "" : "-t.w" + a}`)),
         set("t.s", `t.wt?t.fd:t.dm/(1+${num(AIR)}*math.sqrt(t.vx*t.vx+t.vy*t.vy+t.vz*t.vz))`),
         AX.map((a, k) => [set(Q(i, a), P(i, a)),
-          set(P(i, a), `${P(i, a)}+t.v${a}*t.s+t.fh*t.fq${key(i)}*t.g${k}2${a === "y" ? "-(t.wt?t.gw:t.gh)" : "+t.w" + a}`)])]),
+          set(P(i, a), `${P(i, a)}+t.v${a}*t.s+t.fh*t.fq${key(i)}*t.g${k}2${a === "y" ? "-(t.wt?t.gw:t.gh)" : "+t.w" + a}`)])])),
       set("t.k", 1),
       free.map(({ i, r, c }) => {
-        const top = pid(0, c), max = num(r * H * STRETCH);
-        return [AX.map(a => set("t.d" + a, `${P(i, a)}-${P(top, a)}`)), set("t.e", "math.sqrt(t.dx*t.dx+t.dy*t.dy+t.dz*t.dz)"),
-          when(`t.e>${max}`, AX.map(a => set(P(i, a), `${P(top, a)}+t.d${a}*${max}/t.e`)))];
+        const top = pid(0, c), max = num(depth(r) * STRETCH);
+        return when(`${mass(i)}>0.001`, [AX.map(a => set("t.d" + a, `${P(i, a)}-${P(top, a)}`)), set("t.e", "math.sqrt(t.dx*t.dx+t.dy*t.dy+t.dz*t.dz)"),
+          when(`t.e>${max}`, AX.map(a => set(P(i, a), `${P(top, a)}+t.d${a}*${max}/t.e`)))]);
       }),
       // Collision inside the iteration loop so the links spread each push over the cloth.
       // Rows hanging beside the torso collide with the torso; rows below the hip only with
@@ -313,17 +340,7 @@ function step() {
       // catches columns inside its shrunken width, so edge and centre columns hang free.
       // Lower rows pick by their current body-local height: once the hem has lifted above
       // the hip (running), legs swinging up to ±80° no longer kick it, only the torso holds it.
-      loop(ITER, [links.map(constraint), free.map(({ i, r, c }) => {
-        const x = restX(c);
-        if (restY(r) >= HIP_Y) return torso(i);
-        const legs = [Math.abs(x + 1.9) < LEG_HALF ? legPlane(i, RLEG, "t.rd") : [], Math.abs(x - 1.9) < LEG_HALF ? legPlane(i, LLEG, "t.ld") : []];
-        return [set("t.ly", `t.g01*(${P(i, "x")}-t.bx)+t.g11*(${P(i, "y")}-t.by)+t.g21*(${P(i, "z")}-t.bz)`),
-          when(`t.ly>${num(HIP_Y - 24)}`, torso(i), legs)];
-      }),
-      // Terrain and other players last in each iteration, so the links settle around a block
-      // edge (one pass after the iterations left the cloth stretched over corners) and the
-      // rendered cloth never ends up inside a block.
-      contacts()]),
+      loop(ITER, [links.map(constraint), contacts()]),
     ]),
     // Sleep bookkeeping: hem motion per step this frame, and the leg pose it was taken in.
     set("t.mv", `(${hemProbe.map(i => AX.map(a => `math.abs(${P(i, a)}-t.w${key(i)}${a})`).join("+")).join("+")})/t.n`),
@@ -337,40 +354,47 @@ function step() {
 // crossed since the last step (toward the player's own foot cell, never solid, if it was
 // already inside: pushing up climbed stacked blocks and stretched the cape), clamp to the floor
 // plane, push out of another player's body, and write back only if something moved it.
-const colliders = free.filter(({ r }) => r >= CLAMP_ROW).map(({ i }) => i);
-const choose = (idx, vals, s = 0) => { if (vals.length === 1) return vals[0]; const h = vals.length >> 1;
-  return `(${idx}<${s + h}?${choose(idx, vals.slice(0, h), s)}:${choose(idx, vals.slice(h), s + h)})`; };
-const dispatch = (idx, vals, fn, s = 0) => { if (vals.length === 1) return fn(vals[0]); const h = vals.length >> 1;
-  return when(`${idx}<${s + h}`, dispatch(idx, vals.slice(0, h), fn, s), dispatch(idx, vals.slice(h), fn, s + h)); };
+const colliders = free.map(({ i }) => i);
+const dispatch = (idx, vals, fn, s = 0) => { if(vals.length===1)return fn(vals[0]);const h=vals.length>>1;
+  return when(`${idx}<${s+h}`,dispatch(idx,vals.slice(0,h),fn,s),dispatch(idx,vals.slice(h),fn,s+h)); };
+function localPlane(normal,d,carry=false) {
+  return [set('t.pd', `${d}-(${normal.map((n,k)=>n+'*t.p'+AX[k]).join('+')})`),
+    when('t.pd>0',[AX.map((a,k)=>[set('t.p'+a,`t.p${a}+${normal[k]}*t.pd`),
+      carry ? set('t.q'+a,`t.q${a}+${normal[k]}*t.pd*${num(1-LEG_CARRY)}`) : []]),set('t.ch',1),carry?set('t.qh',1):[]])];
+}
 function contacts() {
-  if (!colliders.length) return [];
-  // Molang's math.min takes exactly two arguments (a three-argument call broke the whole
-  // expression in game), so the lowest hem probe is nested.
-  const gap = num(WALL_GAP), px = num(PX), low = hemProbe.map(i => P(i, "y")).reduce((a, b) => `math.min(${a},${b})`);
-  return when(`v.cwtb>0||v.cp_platform>0||t.vn||${low}<v.cwfl+4`, [set("t.ci", 0), loop(colliders.length, [
-    AX.map(a => [set("t.p" + a, choose("t.ci", colliders.map(i => P(i, a)))), set("t.q" + a, choose("t.ci", colliders.map(i => Q(i, a))))]),
-    set("t.ch", 0), AX.map(a => set("t.za" + a, `math.floor((t.p${a}-v.cwo${a})/${px})`)),
-    when("math.abs(t.zax)<2&&math.abs(t.zaz)<2&&t.zay>=0&&t.zay<2", [
-      set("t.bit", "math.pow(2,(t.zay*3+t.zaz+1)*3+t.zax+1)"),
-      when(`v.cp_platform&&math.mod(math.floor(v.cp_platform/t.bit),2)&&t.qy>=v.cwoy+(t.zay+1)*${px}`,
-        [set("t.py", `v.cwoy+(t.zay+1)*${px}+${gap}`), set("t.ch", 1)]),
-      when("math.mod(math.floor(v.cwtb/t.bit),2)", [
-      AX.map(a => set("t.zb" + a, `math.floor((t.q${a}-v.cwo${a})/${px})`)),
-      set("t.zf", "t.zbx==t.zax&&t.zby==t.zay&&t.zbz==t.zaz"),
-      AX.map(a => set("t.zb" + a, `t.zf?0:t.zb${a}`)),
-      // Candidate exit on each crossed axis; only the shallowest is taken (pushing every
-      // crossed axis snapped a particle that grazed a corner onto its edge).
-      AX.map(a => [set("t.zc" + a, `t.zb${a}>t.za${a}?v.cwo${a}+(t.za${a}+1)*${px}+${gap}:t.zb${a}<t.za${a}?v.cwo${a}+t.za${a}*${px}-${gap}:t.p${a}`),
-        set("t.zd" + a, `t.zb${a}==t.za${a}?1000000:math.abs(t.zc${a}-t.p${a})`)]),
-      set("t.zm", "math.min(t.zdx,math.min(t.zdy,t.zdz))"), AX.map(a => when(`t.zd${a}==t.zm`, set("t.p" + a, "t.zc" + a))),
-      set("t.ch", 1)])]),
-    when("t.py<v.cwfl", [set("t.py", "v.cwfl"), set("t.ch", 1)]),
-    when("t.vn", [set("t.yx", "t.px-t.vcx"), set("t.yz", "t.pz-t.vcz"), set("t.yd", "math.sqrt(t.yx*t.yx+t.yz*t.yz)"),
-      when(`t.yd<${num(VIEWER_R * PX)}&&t.yd>0.001&&t.py>t.vcy&&t.py<t.vcy+${num(VIEWER_H * PX)}`,
-        [set("t.px", `t.vcx+t.yx*${num(VIEWER_R * PX)}/t.yd`), set("t.pz", `t.vcz+t.yz*${num(VIEWER_R * PX)}/t.yd`), set("t.ch", 1)])]),
-    when("t.ch", dispatch("t.ci", colliders, i => AX.map(a => set(P(i, a), "t.p" + a)))),
-    set("t.ci", "t.ci+1"),
-  ])]);
+  const px=num(PX),gap=num(WALL_GAP);
+  return [set('t.ci',0),loop(colliders.length,[
+    dispatch('t.ci',colliders,i=>[set('t.active',mass(i)),when('t.active>0.001',[AX.map(a=>set('t.p'+a,P(i,a))),when('t.ci>=18||v.cwtb>0||v.cp_platform>0',AX.map(a=>set('t.q'+a,Q(i,a))))])]),
+    when('t.active>0.001',[
+      set('t.ch',0),set('t.qh',0),
+      when('t.ci>=18',set('t.ly','t.g01*(t.px-t.bx)+t.g11*(t.py-t.by)+t.g21*(t.pz-t.bz)')),
+      when(`t.ci<${3*(COLS+1)}||t.ly>${HIP_Y-24}`,localPlane(TORSO,'t.td'),[
+        set('t.lx',`-5+math.mod(t.ci,${COLS+1})*${W}`),
+        when(`math.abs(t.lx+1.9)<${LEG_HALF}`,localPlane(RLEG,'t.rd',true)),
+        when(`math.abs(t.lx-1.9)<${LEG_HALF}`,localPlane(LLEG,'t.ld',true))]),
+      when(`t.ci>=${(CLAMP_ROW-1)*(COLS+1)}`,[
+        when('v.cwtb>0||v.cp_platform>0',[
+          AX.map(a=>set('t.za'+a,`math.floor((t.p${a}-v.cwo${a})/${px})`)),
+          when('math.abs(t.zax)<2&&math.abs(t.zaz)<2&&t.zay>=0&&t.zay<2',[
+            set('t.bit','math.pow(2,(t.zay*3+t.zaz+1)*3+t.zax+1)'),
+            when(`v.cp_platform&&math.mod(math.floor(v.cp_platform/t.bit),2)&&t.qy>=v.cwoy+(t.zay+1)*${px}`,
+              [set('t.py',`v.cwoy+(t.zay+1)*${px}+${gap}`),set('t.ch',1)]),
+            when('math.mod(math.floor(v.cwtb/t.bit),2)',[
+              AX.map(a=>set('t.zb'+a,`math.floor((t.q${a}-v.cwo${a})/${px})`)),
+              set('t.zf','t.zbx==t.zax&&t.zby==t.zay&&t.zbz==t.zaz'),
+              AX.map(a=>set('t.zb'+a,`t.zf?0:t.zb${a}`)),
+              AX.map(a=>[set('t.zc'+a,`t.zb${a}>t.za${a}?v.cwo${a}+(t.za${a}+1)*${px}+${gap}:t.zb${a}<t.za${a}?v.cwo${a}+t.za${a}*${px}-${gap}:t.p${a}`),
+                set('t.zd'+a,`t.zb${a}==t.za${a}?1000000:math.abs(t.zc${a}-t.p${a})`)]),
+              set('t.zm','math.min(t.zdx,math.min(t.zdy,t.zdz))'),
+              AX.map(a=>when(`t.zd${a}==t.zm`,set('t.p'+a,'t.zc'+a))),set('t.ch',1)])])]),
+        when('t.py<v.cwfl',[set('t.py','v.cwfl'),set('t.ch',1)]),
+        when('t.vn',[set('t.yx','t.px-t.vcx'),set('t.yz','t.pz-t.vcz'),set('t.yd','math.sqrt(t.yx*t.yx+t.yz*t.yz)'),
+          when(`t.yd<${num(VIEWER_R*PX)}&&t.yd>0.001&&t.py>t.vcy&&t.py<t.vcy+${num(VIEWER_H*PX)}`,[
+            set('t.px',`t.vcx+t.yx*${num(VIEWER_R*PX)}/t.yd`),set('t.pz',`t.vcz+t.yz*${num(VIEWER_R*PX)}/t.yd`),set('t.ch',1)])])]),
+      when('t.ch',dispatch('t.ci',colliders,i=>AX.map(a=>set(P(i,a),'t.p'+a)))),
+      when('t.qh',dispatch('t.ci',colliders,i=>AX.map(a=>set(Q(i,a),'t.q'+a))))
+    ]),set('t.ci','t.ci+1')])];
 }
 
 // A free particle back into body-local coordinates (G is orthonormal, so G^-1 = G^T).
@@ -383,13 +407,13 @@ const toLocal = i => when(`(v.cu${key(i)}t??-1)!=v.cwst`, [AX.map(a => set("t.d"
 function cell(r, c) {
   const A = pid(r, c), B = pid(r, c + 1), C = pid(r + 1, c), D = pid(r + 1, c + 1);
   const cv = (i, a) => !isPinned(i) ? U(i, a) : a === "x" ? num(restX(i)) : a === "y" ? "24" : `(${num(ZMID)}+v.cwaz)`;
-  const pivot = [restX(c) + W / 2, restY(r) - H / 2, ZMID];
+  const pivot = [restX(c) + W / 2, restY(r) - H(r) / 2, ZMID];
   return [
     [A, B, C, D].filter(i => !isPinned(i)).map(toLocal),
     AX.map(a => set("t.m" + a, `(${cv(A, a)}+${cv(B, a)}+${cv(C, a)}+${cv(D, a)})*.25`)),
     AX.map(a => set("t.h" + a, `(${cv(B, a)}-${cv(A, a)}+${cv(D, a)}-${cv(C, a)})*${num(1 / (2 * W))}`)),
-    AX.map(a => set("t.i" + a, `(${cv(A, a)}-${cv(C, a)}+${cv(B, a)}-${cv(D, a)})*${num(1 / (2 * H))}`)),
-    r >= ROWS - BURN_ROWS ? [set(CV(r, c, "sz"), 1), when(burning, burnCell(r, c, H, CV(r, c, "sz")))] : [],
+    AX.map(a => set("t.i" + a, `(${cv(A, a)}-${cv(C, a)}+${cv(B, a)}-${cv(D, a)})*${num(1 / (2 * H(r)))}`)),
+    r >= ROWS - BURN_ROWS ? [set(CV(r, c, "sz"), 1), when(burning, burnCell(r, c, H(r), CV(r, c, "sz")))] : [],
     set("t.la", "math.max(math.sqrt(t.hx*t.hx+t.hy*t.hy+t.hz*t.hz),0.0001)"),
     AX.map(a => set("t.f" + a, `t.h${a}/t.la`)),
     set("t.lb", "t.ix*t.fx+t.iy*t.fy+t.iz*t.fz"),
@@ -406,18 +430,20 @@ function cell(r, c) {
     set(CV(r, c, "rz"), "-math.atan2(t.u1,t.u0)"),
     AX.map((a, k) => set(CV(r, c, "p" + a), `t.m${a}-${num(pivot[k])}`)),
     set(CV(r, c, "sx"), "t.sq+t.sw"), set(CV(r, c, "sy"), "t.sq-t.sw"), set(CV(r, c, "iz"), "(t.a1-t.a2)*.5"),
+    set(CV(r,c,'variant'), `(${burnVar(r,c,'s')}??0)==2?4:(${attachmentBit(r,c-1,1)})+(${attachmentBit(r,c+1,2)})+(${attachmentBit(r+1,c,8)})`),
   ];
 }
 const VISIBLE = "q.has_cape&&!(v.is_first_person??0)&&!(v.map_face_icon??0)&&!q.is_spectator&&!q.is_item_name_any('slot.armor.chest',0,'minecraft:elytra')";
 
-// Bedrock errors on reading a variable that was never set, so every persistent variable
-// gets a value once, behind the same (v.x??0) guard old/ used. Stamps start at -1.
+// Bedrock errors on uninitialised reads. Shared frame state gets defaults once;
+// particle positions are written by reset/seedDetached before their first use.
+// Cell caches and attachment snapshots have their own guarded initialisation.
 export function initDefaults() {
   const text = toMolang(body()) + channels().map(ch => toMolang(ch.nodes) + ch.value).join("");
   // Cell outputs (v.cc) and body-local particles (v.cu) are only read behind ?? or after
   // being written in the same expression, so they need no defaults.
-  const names = [...new Set([...text.matchAll(/\bv\.(c[wpq][a-z0-9_]*)/g)].map(m => m[1]))].filter(n => n !== "cwin");
-  return Object.fromEntries(names.sort().map(n => [n, n === "cwlt" ? -1 : n === "cwbr" ? 4.2 : 0]));
+  const names = [...new Set([...text.matchAll(/\bv\.(c[wpq][a-z0-9_]*)/g)].map(m => m[1]))].filter(n => n !== "cwin" && !/^c[pq][0-9a-z][xyz]$/.test(n));
+  return Object.fromEntries(names.sort().map(n => [n, n === "cwlt" ? -1 : n === "cwbr" ? BURN_END : 0]));
 }
 
 export const program = () => flat(
@@ -430,20 +456,24 @@ function body() {
     set("v.cwaz", "q.get_root_locator_offset('armor_offset.default_neck',1)"),
     set("v.cwon", 0),
     when("!q.is_in_ui&&!(v.is_paperdoll??0)", [
-      // Bone queries fail until the geometry has been evaluated: like old/, wait 0.1 s
-      // after the cape becomes visible before the first q.bone_orientation_trs.
-      when(VISIBLE, when("v.cwwu<0.1", [set("v.cwwu", "v.cwwu+math.clamp(q.delta_time,0,0.05)"), set("v.cwok", 0)],
-        // v.cwlt guards against a second evaluation in the same frame; v.cwst counts the
-        // frames that moved the cloth, and bone channels only recompute when it changes.
-        when("q.life_time!=v.cwlt", [
-          set("v.cwlt", "q.life_time"), origin(), env(), burnClock(), wind(),
+      // A&S also guards bone queries against a clock rollback. A cosmetic reload
+      // can retain our variables while rebuilding geometry: rearm the existing
+      // 0.1 s warmup before querying it again. UI passes never touch this clock.
+      when(VISIBLE, when("q.life_time!=v.cwlt", [
+        when("q.life_time<v.cwlt", [set("v.cwwu", 0), set("v.cwok", 0)]),
+        set("v.cwlt", "q.life_time"),
+        // Count warmup once per world frame too, even with multiple render passes.
+        // v.cwst counts simulated frames for the bone-channel output cache.
+        when("v.cwwu<0.1", [set("v.cwwu", "v.cwwu+math.clamp(q.delta_time,0,0.05)"), set("v.cwok", 0)], [
+          origin(), env(), burnClock(), material(), wind(),
           when("t.sr", set("v.cwac", 0)), schedule(),
-          when("t.sr||t.n>0", [frame(),
+          when("t.sr||t.n>0", [frame(), when("t.sr",reset()), seedDetached(),
             // Asleep: skip the step (the cells stay cached) until an anchor or a leg moves.
-            when("t.sr", [reset(), set("v.cwqt", 0), set("v.cwst", "v.cwst+1")], when(`v.cwqt<${SLEEP_FRAMES}||${wake()}`, [
+            when("t.sr", [set("v.cwqt", 0), set("v.cwst", "v.cwst+1")], when(`v.cwqt<${SLEEP_FRAMES}||${wake()}`, [
               when(`v.cwqt>=${SLEEP_FRAMES}`, set("v.cwqt", 0)), step(), set("v.cwst", "v.cwst+1")]))]),
           set("v.cwok", 1),
-        ])), [set("v.cwok", 0), set("v.cwwu", 0)]),
+        ]),
+      ]), [set("v.cwok", 0), set("v.cwwu", 0)]),
       set("v.cwon", "v.cwok"),
     ]),
   );
@@ -466,7 +496,7 @@ export function channels() {
       [cell(r, c), set(f("lt"), "v.cwst"), burnable ? set(f("ft"), "q.life_time") : []]));
     const add = (bone, channel, axis, field, off) => list.push({ bone, channel, axis, r, c, field, nodes,
       value: `(v.cwon??0)?(${f(field)}??${off}):${off}` });
-    const dy = num(restY(r) - H / 2 - 24), vr = "(6+126*q.cape_flap_amount)";
+    const dy = num(restY(r) - H(r) / 2 - 24), vr = "(6+126*q.cape_flap_amount)";
     ["rx", "ry", "rz"].forEach((k, axis) => add(n.outer, "rotation", axis, k, axis === 0 ? vr : 0));
     ["px", "py", "pz"].forEach((k, axis) => add(n.outer, "position", axis, k,
       [0, `${dy}*(math.cos(${vr})-1)`, `((v.cwaz??0)-${dy}*math.sin(${vr}))`][axis]));
@@ -496,48 +526,48 @@ export function bones() {
 // when flat) and covers the cracks a bend or an imperfect parallelogram fit opens.
 // The cape's outer border is never extended. Pivots and the fit stay on the rest cell.
 export const OVERLAP = envNum("OVERLAP", 0.75);  // sweep: 0.5 left 3.4% cracked frames (leg swing), 0.6 none; 0.75 for margin
-export function geometry() {
-  const list = [{ name: "root", pivot: [0, 0, 0] }, { name: "waist", parent: "root", pivot: [0, 12, 0] },
-    { name: "body", parent: "waist", pivot: [0, 24, 0] }];
-  each((r, c) => {
-    const n = boneNames(r, c), x0 = restX(c), y1 = restY(r), v0 = 1 + r * H;
-    const L = c > 0 ? OVERLAP : 0, Rt = c < COLS - 1 ? OVERLAP : 0, T = r > 0 ? OVERLAP : 0, B = r < ROWS - 1 ? OVERLAP : 0;
-    const w = W + L + Rt, h = H + T + B, vt = round(v0 - T);
-    const pivot = [round(x0 + W / 2), round(y1 - H / 2), ZMID];
-    const uv = {
-      north: { uv: [round(17 + x0 - L), vt], uv_size: [round(w), round(h)] },
-      south: { uv: [round(6 - x0 - W - Rt), vt], uv_size: [round(w), round(h)] },
-    };
-    // Bedrock names faces in mirrored x: "east" is the -x side, "west" the +x side (in game,
-    // a "west" face on the leftmost column was hidden inside the cape). _sample's turned cape
-    // puts its u 0 strip on our +x edge and the u 11 strip on our -x edge.
-    // Detaching tiles expose previously internal faces. Close those existing
-    // cubes with the cape's edge texels; do not add geometry or enlarge overlap.
-    const detachable = r >= ROWS - BURN_ROWS;
-    if (c === 0 || detachable) uv.east = { uv: [11, vt], uv_size: [1, round(h)] };
-    if (c === COLS - 1 || detachable) uv.west = { uv: [0, vt], uv_size: [1, round(h)] };
-    if (r === 0 || detachable) uv.up = { uv: [round(6 - x0 + L), 0], uv_size: [round(-w), 1] };
-    uv.down = { uv: [round(16 - x0 + L), 0], uv_size: [round(-w), 1] };  // every row: a burnt hem shows a closed edge
-    list.push({ name: n.outer, parent: "body", pivot }, { name: n.mid, parent: n.outer, pivot },
-      { name: n.mesh, parent: n.mid, pivot, cubes: [{ origin: [round(x0 - L), round(y1 - H - B), 2], size: [round(w), round(h), 1], uv }] });
-  });
-  return { format_version: "1.12.0", "minecraft:geometry": [{
-    description: { identifier: "geometry.cape", texture_width: 64, texture_height: 32,
-      visible_bounds_width: 3, visible_bounds_height: 3.5, visible_bounds_offset: [0, 1.25, 0] },
-    bones: list }] };
+// Only ONE variant per tile is rendered. Variants bake the optional side overlap
+// into both the cube and UV rectangle; switching cannot squash/stretch texels.
+// Vertical overlap closes both sides while attached; the upper tile retracts
+// its bottom overlap as soon as the lower tile is gone, leaving an integer burn edge.
+export const TOP_OVERLAP = OVERLAP;
+export function meshVariants(r,c) {
+  const masks = [0,1,2,3].filter(m => (c>0||!(m&1))&&(c<COLS-1||!(m&2)));
+  const list = masks.flatMap(code=>(r<ROWS-1?[0,8]:[0]).map(bottom=>({code:code+bottom,L:code&1?OVERLAP:0,R:code&2?OVERLAP:0,T:r>0?TOP_OVERLAP:0,B:bottom?OVERLAP:0})));
+  if(r>0) list.push({code:4,L:0,R:0,T:0,B:0});
+  return list;
 }
-
-// Same visibility rule as _sample, applied to every cube bone.
+export function geometry() {
+  const list = [{name:'root',pivot:[0,0,0]},{name:'waist',parent:'root',pivot:[0,12,0]}, {name:'body',parent:'waist',pivot:[0,24,0]}];
+  each((r,c)=>{
+    const n=boneNames(r,c),x0=restX(c),y1=restY(r),v0=1+depth(r);
+    const pivot=[x0+W/2,y1-H(r)/2,ZMID];
+    list.push({name:n.outer,parent:'body',pivot},{name:n.mid,parent:n.outer,pivot},{name:n.mesh,parent:n.mid,pivot});
+    for(const {code,L,R,T,B} of meshVariants(r,c)) {
+      const w=W+L+R,h=H(r)+T+B,vt=round(v0-T);
+      const uv={
+        north:{uv:[round(17+x0-L),vt],uv_size:[round(w),round(h)]},
+        south:{uv:[round(6-x0-W-R),vt],uv_size:[round(w),round(h)]},
+        east:{uv:[11,vt],uv_size:[1,round(h)]},west:{uv:[0,vt],uv_size:[1,round(h)]},
+        up:{uv:[round(6-x0+L),0],uv_size:[round(-w),1]},
+        down:{uv:[round(16-x0+L),0],uv_size:[round(-w),1]}
+      };
+      list.push({name:n.mesh+'_'+code,parent:n.mesh,pivot,cubes:[{origin:[round(x0-L),round(y1-H(r)-B),2],size:[round(w),round(h),1],uv}]});
+    }
+  });
+  return {format_version:'1.12.0','minecraft:geometry':[{description:{identifier:'geometry.cape',texture_width:64,texture_height:32,
+    visible_bounds_width:3,visible_bounds_height:3.5,visible_bounds_offset:[0,1.25,0]},bones:list}]};
+}
 export function renderController() {
-  const show = "query.armor_texture_slot(1) != 5 && (!variable.is_first_person || variable.is_paperdoll) && !variable.map_face_icon && !query.is_spectator";
-  return { format_version: "1.8.0", render_controllers: { "controller.render.player.cape": {
-    rebuild_animation_matrices: true, geometry: "Geometry.cape", materials: [{ "*": "Material.cape" }], textures: ["Texture.cape"],
-    part_visibility: [Object.fromEntries(each((r, c) => {
-      const n = boneNames(r, c).mesh;
-      if (r < ROWS - BURN_ROWS) return [n, show];  // rows 0-2: always shown
-      // No flashing. Keep UI/paperdoll presentation independent of world burning.
-      return [n, `${show} && (!(v.cwon??0)||(${burnVar(r, c, "show")}??1))`];
-    }))],
-    is_hurt_color: { r: 0, g: 0, b: 0, a: 0 } } } };
+  const show="query.armor_texture_slot(1) != 5 && (!variable.is_first_person || variable.is_paperdoll) && !variable.map_face_icon && !query.is_spectator";
+  const visibility={};
+  each((r,c)=>{
+    const full=(c>0?1:0)+(c<COLS-1?2:0)+(r<ROWS-1?8:0),mode=`((v.cwon??0)?(${CV(r,c,'variant')}??${full}):${full})`;
+    for(const {code} of meshVariants(r,c)) visibility[boneNames(r,c).mesh+'_'+code]=`${show}&&${mode}==${code}&&(!(v.cwon??0)||(${burnVar(r,c,'show')}??1))`;
+  });
+  return {format_version:'1.8.0',render_controllers:{'controller.render.player.cape':{
+    rebuild_animation_matrices:true,geometry:'Geometry.cape',materials:[{'*':'Material.cape'}],textures:['Texture.cape'],
+    part_visibility:[visibility],is_hurt_color:{r:0,g:0,b:0,a:0}
+  }}};
 }
 export const sections = () => ({ origin: origin(), frame: frame(), reset: reset(), step: step(), cell: cell(1, 1) });
