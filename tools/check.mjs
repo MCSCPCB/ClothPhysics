@@ -3,6 +3,7 @@
 // and logic only; Bedrock's real transform conventions still need the in-game test.
 import { program, channels, initDefaults, pid, restX, restY, COLS, ROWS, W, H, ZMID, OVERLAP, CLAMP_ROW } from "./cloth.mjs";
 import { toMolang, compileJs, jsReturn, MATH, strict, checkMolang } from "./molang.mjs";
+import { burnVar } from './burn.mjs';
 
 const D = Math.PI / 180, key = i => i.toString(36), PX = 16 / 0.9375;
 checkMolang(toMolang(program()), "anim_time_update");
@@ -32,16 +33,24 @@ const particle = (v, r, c, az) => r === 0 ? [restX(c), 24, ZMID + az] : ["x", "y
 // "room" (floor at y 63, roof from y 66) keeps the original cases indoors and windless.
 const ROOM = { solid: (x, y) => y <= 63 || y >= 66 };
 const OPEN = { solid: (x, y) => y <= 63 };
-const WATER_TAGS = new Set(["water", "lava"]);
+const PICKAXE = "minecraft:is_pickaxe_item_destructible", AXE = "minecraft:is_axe_item_destructible";
+const SHOVEL = "minecraft:is_shovel_item_destructible", SHEARS = "minecraft:is_shears_item_destructible";
 function query(s) {
   const w = s.world ?? ROOM, P = s.pos ?? [0, 64, 0];
   const wet = (x, y, z) => w.water !== undefined && y < w.water;
   const roofed = [1, 2, 3, 4, 5, 6].some(d => w.solid(Math.floor(P[0]), Math.floor(P[1]) + d, Math.floor(P[2])));
+  const tagsAt = (x, y, z) => w.tags?.(x, y, z) ?? (wet(x, y, z) ? ["water"] :
+    w.snow?.(x, y, z) ? ["snow", SHOVEL] : w.solid(x, y, z) ? [PICKAXE] : []);
+  const blockTags = (all, x, y, z, tags) => {
+    s.queries = (s.queries ?? 0) + 1;
+    const present = tagsAt(Math.floor(x), Math.floor(y), Math.floor(z));
+    return +(all ? tags.every(tag => present.includes(tag)) : tags.some(tag => present.includes(tag)));
+  };
   return {
     // q.position(1) is the player's eye, 1.62 above the feet, as in game.
     life_time: () => s.time, delta_time: () => s.dt, frame_alpha: () => s.alpha, position: k => s.pos[k] + (k === 1 ? 1.62 : 0),
     body_y_rotation: () => s.yaw, bone_orientation_trs: name => s.bones[name], get_root_locator_offset: () => s.armorZ,
-    has_cape: () => 1, is_in_ui: () => s.ui, is_spectator: () => 0, is_item_name_any: () => 0,
+    has_cape: () => 1, is_in_ui: () => s.ui, is_spectator: () => 0, is_item_name_any: () => 0, is_on_ground: () => +(s.grounded ?? true),
     time_stamp: () => s.stamp ?? 0, is_in_water: () => +wet(...P), is_in_contact_with_water: () => +wet(P[0], P[1] - 0.1, P[2]),
     is_in_lava: () => 0, is_in_water_or_rain: () => +(wet(...P) || (!!w.rain && !roofed)),
     entity_biome_has_any_tags: (...tags) => +tags.some(t => (w.biome ?? []).includes(t)),
@@ -49,8 +58,8 @@ function query(s) {
     is_local_player: () => +!s.viewer, distance_from_camera: () => s.viewer?.dist ?? 50,
     rotation_to_camera: k => s.viewer?.rot[k] ?? 0,
     // Absolute block cells only (the relative query is eye-based for players and not mocked).
-    block_has_any_tag: (x, y, z, ...tags) => { s.queries = (s.queries ?? 0) + 1;
-      return +(tags.some(t => WATER_TAGS.has(t)) ? wet(x, y, z) : w.solid(x, y, z) && !wet(x, y, z)); },
+    block_has_any_tag: (x, y, z, ...tags) => blockTags(false, x, y, z, tags),
+    block_has_all_tags: (x, y, z, ...tags) => blockTags(true, x, y, z, tags),
   };
 }
 
@@ -92,7 +101,7 @@ function run(opt) {
   const { fps, seconds = 14, armorZ = 0, scenario = motion, world = ROOM, stamp = 0 } = opt;
   const v = strict({}), s = { ui: 0, armorZ, world };
   let t = 0, dt = 1 / fps;
-  let path = [0, 64, 0], phase = 0, tickPrev = null, tickCur = null, tick = -1, lagged = null;
+  let path = [0, 64 + (opt.floorOffset ?? 0), 0], phase = 0, tickPrev = null, tickCur = null, tick = -1, lagged = null;
   const m = { nan: 0, uiLeak: 0, seam: 0, fit: 0, stretch: 0, restDrift: 0, lift: [], jumpPx: 0, prevU: null, series: {}, kick: 0, legClip: 0 };
   for (let f = 0; t < seconds; f++, t += dt) {
     dt = (1 + (opt.jitter ?? 0) * Math.sin(f * 2.39996)) / fps;
@@ -111,8 +120,9 @@ function run(opt) {
       leftleg: { t: { x: 1.9, y: 12, z: mo.sneak ? 4 : 0 }, r: { x: -swing, y: 0, z: 0 } },
     };
     Object.assign(s, { time: t, dt, alpha: t * 20 - nowTick, pos: tickCur, yaw: mo.yaw, bones: lagged ?? bones, ui: 0, stamp: stamp + nowTick,
-      viewer: opt.viewer?.(t, tickCur), fire: opt.fire?.(t) });
+      viewer: opt.viewer?.(t, tickCur), fire: opt.fire?.(t), grounded: mo.grounded ?? (mo.jump === 0 && !mo.rise) });
     prog(v, query(s), MATH);
+    opt.inspect?.(v, s);
     const cells = evalChannels(v, query(s));
     lagged = bones;
     // UI pass in the same frame must not change any world state.
@@ -137,7 +147,8 @@ function run(opt) {
       m.deflect = (m.deflect ?? 0) + hem.reduce((n, d) => n + len(d), 0) / hem.length;
       m.hemUp = (m.hemUp ?? 0) + hem.reduce((n, d) => n + d[1], 0) / hem.length;
       m.wind = (m.wind ?? 0) + Math.hypot(v.cwnx, v.cwnz);
-      m.burnMax = Math.max(m.burnMax ?? 0, v.cwbn); m.burnEnd = v.cwbn;
+      const burnt = Array.from({ length: 12 }, (_, i) => v.__opt(burnVar(3 + (i >> 2), i % 4, 's').slice(2)) ?? 0).filter(s => s === 2 || s === 3).length / 4;
+      m.burnMax = Math.max(m.burnMax ?? 0, burnt); m.burnEnd = burnt;
       if (m.lastBase && Math.abs(v.cwby - m.lastBase) > 1e-9) m.resets = (m.resets ?? 0) + 1;
       m.lastBase = v.cwby;
       const hc = particle(v, ROWS, COLS >> 1, armorZ);
@@ -158,21 +169,29 @@ function run(opt) {
       for (let r = 1; r <= ROWS; r++) for (let c = 0; c <= COLS; c++) {
         const w = ["x", "y", "z"].map((a, k) => v[`cwb${a}`] + v[`cp${key(pid(r, c))}${a}`] / PX - (a === "y" ? bias : 0)), cellOf = w.map(Math.floor);
         if (!s.world.solid(...cellOf)) continue;
-        const depth = Math.min(...w.map((x, k) => Math.min(x - cellOf[k], cellOf[k] + 1 - x))) * PX;
+        // The tag query sees a snow cell; the test world's actual collision top can
+        // be lower. Air above a thin snow layer is not penetration.
+        const top = cellOf[1] + (s.world.height?.(...cellOf) ?? (s.world.snow?.(...cellOf) ? s.world.snowHeight : 1));
+        if (w[1] >= top) continue;
+        const depth = Math.min(top - w[1], ...w.map((x, k) => Math.min(x - cellOf[k], cellOf[k] + 1 - x))) * PX;
         if (r >= CLAMP_ROW) m.pen = Math.max(m.pen ?? 0, depth); else m.penTop = Math.max(m.penTop ?? 0, depth);
       }
     }
     const pt = (r, c) => particle(v, r, c, armorZ);
     const total = { seam: m.seam, fit: m.fit, stretch: m.stretch };
     m.seam = m.fit = m.stretch = 0;
+    // An ash or an unfolding tile intentionally leaves its original four corners.
+    // Measure intact cloth here; check-burn.mjs checks the animated edge/ash frame.
+    const intact = (r, c) => !(v.__opt(burnVar(r, c, 's').slice(2)) ?? 0);
     for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+      if (!intact(r, c)) continue;
       const cl = cells[`${r},${c}`];
       for (const [dr, dc] of [[0, 0], [0, 1], [1, 0], [1, 1]]) {
         const p = place(cl, r, c, corner(r + dr, c + dc));
         m.fit = Math.max(m.fit, len(sub(p, pt(r + dr, c + dc))));
         // Same corner as rendered by the neighbouring cells.
         for (const [nr, nc] of [[r + dr - 1, c + dc - 1], [r + dr - 1, c + dc], [r + dr, c + dc - 1], [r + dr, c + dc]])
-          if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS && (nr !== r || nc !== c))
+          if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS && (nr !== r || nc !== c) && intact(nr, nc))
             m.seam = Math.max(m.seam, len(sub(p, place(cells[`${nr},${nc}`], nr, nc, corner(r + dr, c + dc)))));
       }
     }
@@ -279,8 +298,45 @@ const envCases = [
   ["run in water", standCase({ ...OPEN, water: 66, rain: true }, { surface: 66,
     scenario: t => ({ speed: t < 1 ? 0 : 2, yaw: 0, sneak: false, jump: 0, teleport: 0 }) })],
 ];
-const ENV_CASES = envCases.length;
 cases.push(...envCases);
+// Regression: full-cube snow around the excluded player cell used to squeeze a
+// 10 px hem to less than 1 px. Keep real stone walls in the same snow-covered ring.
+const snowWorld = { solid: (x, y) => y <= 64 || y >= 66, snow: (x, y) => y === 64, snowHeight: 0.125 };
+const snowWalk = yaw => t => ({ speed: t < 0.5 ? 0 : 2, yaw, sneak: false, jump: 0, teleport: 0 });
+cases.push(
+  ["snow walk edge", standCase(snowWorld, { floorOffset: 0.125, start: [0.05, 0.15], seconds: 6, scenario: snowWalk(0), runWindow: [0.6, 6], minHemWidth: 0.8 })],
+  ["snow walk centre", standCase(snowWorld, { floorOffset: 0.125, start: [0.5, 0.15], seconds: 6, scenario: snowWalk(0), runWindow: [0.6, 6], minHemWidth: 0.8 })],
+  ["snow walk diagonal", standCase(snowWorld, { floorOffset: 0.125, start: [0.05, 0.15], seconds: 6, scenario: snowWalk(45), runWindow: [0.6, 6], minHemWidth: 0.8 })],
+  ["snow beside stone wall", standCase({ ...snowWorld, solid: (x, y) => y <= 64 || y >= 66 || (x === -1 && y <= 65), snow: (x, y) => x !== -1 && y === 64 },
+    { floorOffset: 0.125, start: [0.3, 0.15], seconds: 6, scenario: snowWalk(0), runWindow: [0.6, 6] })],
+);
+// Non-full supporting blocks use real heights independently of the query mock.
+// In particular, slab and full stone share the same tags: the player's footprint
+// must establish support without deleting a full wall beside it.
+const partialWorld = (height, tags) => ({ ...ROOM, solid: (x, y) => y <= 64 || y >= 67,
+  height: (x, y) => y === 64 ? height : 1,
+  tags: (x, y) => y === 64 ? tags : y <= 63 || y >= 67 ? [PICKAXE] : [] });
+const partialWalk = (world, height, extra = {}) => standCase(world, {
+  floorOffset: height, start: [0.05, 0.15], seconds: 6, scenario: snowWalk(0), runWindow: [0.6, 6], minHemWidth: 0.8, ...extra });
+cases.push(
+  ["stone slab walk edge", partialWalk(partialWorld(0.5, [PICKAXE]), 0.5)],
+  ["stone slab walk centre", partialWalk(partialWorld(0.5, [PICKAXE]), 0.5, { start: [0.5, 0.15] })],
+  ["stone slab walk diagonal", partialWalk(partialWorld(0.5, [PICKAXE]), 0.5, { scenario: snowWalk(45) })],
+  ["wood slab walk", partialWalk(partialWorld(0.5, [AXE]), 0.5)],
+  ["bed walk", partialWalk(partialWorld(0.625, [AXE]), 0.625)],
+  ["farmland walk", partialWalk(partialWorld(0.9375, [SHOVEL]), 0.9375)],
+  ["trapdoor walk", partialWalk(partialWorld(0.1875, [AXE, "trapdoors"]), 0.1875)],
+  ["rail walk", partialWalk({ ...ROOM, tags: (x, y) => y === 64 ? [PICKAXE, "rail"] : y <= 63 || y >= 66 ? [PICKAXE] : [] }, 0)],
+  ["one-way side walk", partialWalk({ ...ROOM, tags: (x, y) => y === 65 ? [AXE, "one_way_collidable"] : y <= 63 || y >= 66 ? [PICKAXE] : [] }, 0)],
+  ["slab beside stone wall", standCase({
+    solid: (x, y, z) => y <= 64 || (z === -1 && y <= 65), rain: true,
+    height: (x, y, z) => y === 64 && z !== -1 ? 0.5 : 1,
+  }, { floorOffset: 0.5, start: [0.5, 0.3] })],
+  ["shears-only wall", standCase({
+    solid: (x, y, z) => y <= 63 || (z === -1 && y <= 65), rain: true,
+    tags: (x, y, z) => z === -1 && y >= 64 && y <= 65 ? [SHEARS] : y <= 63 ? [PICKAXE] : [],
+  }, { start: [0.5, 0.3] })],
+);
 const env = {};
 if (process.env.CHECK_CASES) cases.splice(0, cases.length, ...cases.filter(([n]) => process.env.CHECK_CASES.split(",").includes(n)));
 const fmt = n => n.toFixed(3);
@@ -331,6 +387,7 @@ for (const [name, opt] of cases) {
   console.log(`  info cell updates/s ${((m.stamps ?? 0) / (opt.seconds ?? 14)).toFixed(1)}, asleep while standing ${(100 * (m.asleep ?? 0) / (m.standFrames || 1)).toFixed(0)}%`);
   if (!opt.scenario) check("wakes when walking", m.sleptWalking ?? 0, !m.sleptWalking);
   if (opt.runWindow) console.log(`  info run: lift ${lift.toFixed(1)} deg, hem sway px ${fmt(m.sway)}, min hem width ${fmt(m.width)}, ripple px ${fmt(m.rippleMax - m.rippleMin)}`);
+  if (opt.minHemWidth) check("hem width / rest width", fmt(m.width), m.width >= opt.minHemWidth);
   // Pose snaps (sneak toggle) legitimately move the cloth; only the rebase must be invisible.
   if (opt.scenario && !opt.env) check("max per-frame jump px", fmt(m.jumpPx), m.jumpPx < 3);
   if (opt.env) {
@@ -344,7 +401,7 @@ for (const [name, opt] of cases) {
   }
 }
 // Comparisons between environment cases.
-if (Object.keys(env).length === cases.filter(([, o]) => o.env).length && Object.keys(env).length === ENV_CASES) {
+if (envCases.every(([name]) => name in env)) {
 console.log("environment");
 check("outdoor wind > 0.3 b/s", fmt(env["outdoor stand"].wind), env["outdoor stand"].wind > 0.3);
 check("outdoor stays awake", fmt(env["outdoor stand"].sleep), env["outdoor stand"].sleep < 0.1);
@@ -365,7 +422,7 @@ check("fire: hem lifts and billows", `${fmt(env["fire indoors"].hemUp)} up, ${fm
 check("sprint on fire: hem higher than without", `${fmt(env["sprint on fire"].hemUp)} > ${fmt(env["sprint along wall"].hemUp)}`, env["sprint on fire"].hemUp > env["sprint along wall"].hemUp);
 check("fire: hem burns 3 rows", fmt(env["fire indoors"].burnMax), Math.abs(env["fire indoors"].burnMax - 3) < 1e-6);
 check("after the fire: cape settles", `${fmt(env["after the fire"].deflect)} px, asleep ${fmt(env["after the fire"].sleep)}`, env["after the fire"].deflect < 1 && env["after the fire"].sleep > 0.5);
-check("after the fire: grows back", fmt(env["after the fire"].burnEnd), env["after the fire"].burnEnd < 2.3 && env["after the fire"].burnEnd > 2);
+check("after the fire: grows back", fmt(env["after the fire"].burnEnd), env["after the fire"].burnEnd === 0);
 check("cape kept out of the other player", fmt(env["other player behind"].inViewer), env["other player behind"].inViewer < 0.05);
 check("underwater hem floats up", `${fmt(env["underwater stand"].hemUp)} > ${fmt(env["roofed stand"].hemUp)}`, env["underwater stand"].hemUp > env["roofed stand"].hemUp + 1);
 }

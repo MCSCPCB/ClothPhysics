@@ -5,6 +5,7 @@
 // G = Y*R maps body-local offsets into sim. R is the animated body rotation from
 // q.bone_orientation_trs; Y is the yaw and z flip used by Simple Ragdoll's boneOutput.
 import { set, when, loop, flat, num, toMolang } from "./molang.mjs";
+import { BURN_ROWS, burnClock, burnCell, burnVar, burning } from "./burn.mjs";
 
 export const COLS = 4, ROWS = 6, W = 10 / COLS, H = 16 / ROWS;
 export const ZMID = 2.5;                 // cape mid-plane at rest (cube z 2..3)
@@ -25,8 +26,9 @@ const SUB_DT = 1 / 60, MAX_SUB = 3, ITER = 2, STRETCH = 1.02, REBASE = 4096;
 // Sleep once the hem moves less than SLEEP_EPS px per step for SLEEP_FRAMES stepped frames;
 // wake when an anchor or a leg moves by WAKE_EPS (VanillaRagdoll sleeps the same way).
 const SLEEP_FRAMES = 30, SLEEP_EPS = envNum("SLEEP_EPS", 0.002), WAKE_EPS = 0.01;
-// Solid blocks: Simple Ragdoll's default terrain tags. Water and lava carry none of them.
-const SOLID = "'minecraft:is_axe_item_destructible','minecraft:is_hoe_item_destructible','minecraft:is_pickaxe_item_destructible','minecraft:is_shovel_item_destructible','not_feature_replaceable'";
+// A&S player terrain candidates include shears as well as the four tool groups.
+// These tags identify materials, not collision shapes; support is resolved below.
+const SOLID = "'minecraft:is_axe_item_destructible','minecraft:is_hoe_item_destructible','minecraft:is_pickaxe_item_destructible','minecraft:is_shovel_item_destructible','minecraft:is_shears_item_destructible','not_feature_replaceable'";
 // Cloth stops this many px short of a block face. VIEWER: radius and height (blocks) of
 // another player's body as seen from their camera, for pushing this cape.
 const WALL_GAP = 0.5, VIEWER_R = 0.35, VIEWER_H = 1.8;
@@ -39,10 +41,9 @@ const WIND = envNum("WIND", 0.5), WIND_RAIN = 2.5, WIND_SNOW = 1.3, WIND_CALM = 
 // Fluids: velocity kept per 60 Hz step and the share of gravity left after buoyancy.
 // Fire: the heat (0..1) takes HEAT_LIFT of the weight off the cape and makes it billow (sweep:
 // lift above 1 flips the cape over the head, flutter 4 opens 2 px seams; 1 and 2 lift the hem
-// about 6 px with 0.8 px seams); the
-// hem burns away up to BURN_ROWS rows, one row per 1/BURN_RATE s on fire, and grows back one
-// row per 1/REGROW_RATE s once out (hidden rows still simulate, only their cubes are hidden).
-const HEAT_LIFT = envNum("HEAT_LIFT", 1), HEAT_FLUTTER = envNum("HEAT_FLUTTER", 2), BURN_ROWS = 3, BURN_RATE = 0.5, REGROW_RATE = 0.1;
+// about 6 px with 0.8 px seams). Burning tiles are animated in burn.mjs; hidden
+// rows keep their original particles, weight and constraints.
+const HEAT_LIFT = envNum("HEAT_LIFT", 1), HEAT_FLUTTER = envNum("HEAT_FLUTTER", 2);
 const WATER_DRAG = envNum("WATER_DRAG", 0.8), WATER_G = envNum("WATER_G", -0.05), LAVA_DRAG = 0.6, LAVA_G = 0.05;
 
 const NP = (ROWS + 1) * (COLS + 1);
@@ -103,33 +104,53 @@ function origin() {
   ];
 }
 
-// Whole blocks around the feet, cached when the player enters a new block cell (and once a
-// second for block edits), with absolute block queries at the feet as VanillaRagdoll's player
-// rig does (relative queries and q.position are eye-based for players). Bits 0-17: the 3x3 columns around the feet at foot
-// level (dy 0) and one up (dy 1), index (dy*3+dz+1)*3+dx+1; the player's own column (4, 13)
-// is never queried, so a slab or stair the player stands in does not push the cape. Bit 18:
-// ceiling (dy 2). Particles that land in a cached solid cell leave it through the face they
-// crossed, as Simple Ragdoll's cell contacts do; below the ring only a floor plane remains.
-const RING = 19, OWN = [4, 13];
+// Cached 3x3 terrain ring, absolute feet coordinates (player queries are eye-based).
+// A&S player pre_animation uses grounded height and the 0.2001 edge test to find
+// supporting cells under the 0.6-block player footprint, including adjacent cells.
+// We use that evidence for cape contacts: occupied foot cells cannot be full walls
+// above the feet. Keep observed support cells while moving at the same grounded
+// height, so crossing a cell boundary does not recreate a wall behind the cape.
+// This is a local surface approximation, not a query of slab/stair/door block state.
+// Bits 0-17: foot level and one up; 18: ceiling. Sample 19 supplies the floor plane.
+const RING = 20, OWN = [4, 13];
 function env() {
   const bit = n => `math.mod(math.floor(v.cwtb/${2 ** n}),2)`;
   return [
     AX.map((a, k) => set("t.e" + a, `math.floor(${k === 1 ? feetY : `q.position(${k})`})`)),
+    ["x", "z"].map((a, k) => [set("t.f" + a, `q.position(${k * 2})-t.e${a}-0.5`),
+      set("t.f" + a, `math.abs(t.f${a})>0.2001?(t.f${a}>0?1:-1):0`)]),
     set("v.cwtt", "v.cwtt+math.clamp(q.delta_time,0,0.1)"),
-    when("t.sr||v.cwtt>1||t.ex!=v.cwex||t.ey!=v.cwey||t.ez!=v.cwez", [
-      AX.map(a => set("v.cwe" + a, "t.e" + a)), set("v.cwtt", 0), set("v.cwtb", 0), set("t.i", 0),
+    when(`t.sr||v.cwtt>1||t.ex!=v.cwex||t.ey!=v.cwey||t.ez!=v.cwez||q.is_on_ground!=v.cp_grounded||(q.is_on_ground&&(((t.fx!=v.cp_fx||t.fz!=v.cp_fz)&&${feetY}>t.ey+0.001)||math.abs(${feetY}-v.cp_fy)>0.001))`, [
+      set("t.sm", `!t.sr&&q.is_on_ground&&v.cp_grounded&&math.abs(${feetY}-v.cp_fy)<0.001?v.cp_support:0`),
+      set("t.sx", "t.ex-v.cwex"), set("t.sz", "t.ez-v.cwez"), set("v.cp_support", 0),
+      set("v.cp_fx", "t.fx"), set("v.cp_fz", "t.fz"), set("v.cp_fy", feetY),
+      AX.map(a => set("v.cwe" + a, "t.e" + a)), set("v.cwtt", 0), set("v.cwtb", 0), set("v.cp_platform", 0), set("t.i", 0),
+      set("v.cp_grounded", "q.is_on_ground"),
+      // The combined snow + shovel test is also used by A&S to distinguish snow
+      // from another surface at the same height. Never flatten unrelated stone.
+      set("v.cp_on_snow", "v.cp_grounded&&q.block_has_all_tags(t.ex,t.ey,t.ez,'snow','minecraft:is_shovel_item_destructible')"),
       loop(RING, [
         set("t.dx", "t.i<18?math.mod(t.i,3)-1:0"), set("t.dz", "t.i<18?math.mod(math.floor(t.i/3),3)-1:0"),
-        set("t.dy", "math.floor(t.i/9)"),
-        when(`t.i!=${OWN[0]}&&t.i!=${OWN[1]}&&q.block_has_any_tag(t.ex+t.dx,t.ey+t.dy,t.ez+t.dz,${SOLID})`,
-          set("v.cwtb", "v.cwtb+math.pow(2,t.i)")), set("t.i", "t.i+1"),
+        set("t.dy", "t.i==19?-1:math.floor(t.i/9)"),
+        // A&S also distinguishes rail and one_way_collidable tags. For cloth,
+        // rails have no solid face; one-way cells only catch a fall from above.
+        set("t.solid", `t.i!=${OWN[1]}&&q.block_has_any_tag(t.ex+t.dx,t.ey+t.dy,t.ez+t.dz,${SOLID})`),
+        when("t.solid", set("t.solid", "q.block_has_any_tag(t.ex+t.dx,t.ey+t.dy,t.ez+t.dz,'rail')?0:(q.block_has_any_tag(t.ex+t.dx,t.ey+t.dy,t.ez+t.dz,'one_way_collidable')?2:1)")),
+        when("t.i==19", set("v.cwfl", `t.solid?(t.ey-v.cwby)*${num(PX)}+${num(MARGIN)}:-1000000`),
+          when("t.solid==2", set("v.cp_platform", "v.cp_platform+math.pow(2,t.i)"), when("t.solid", [
+            set("t.support", "t.dy==0&&v.cp_grounded&&((t.dx==0||t.dx==t.fx)&&(t.dz==0||t.dz==t.fz)||(math.abs(t.dx+t.sx)<2&&math.abs(t.dz+t.sz)<2&&math.mod(math.floor(t.sm/math.pow(2,(t.dz+t.sz+1)*3+t.dx+t.sx+1)),2))||(v.cp_on_snow&&q.block_has_all_tags(t.ex+t.dx,t.ey,t.ez+t.dz,'snow','minecraft:is_shovel_item_destructible')))"),
+            when("t.support", set("v.cp_support", "v.cp_support+math.pow(2,t.i)"),
+              when(`t.i!=${OWN[0]}`, set("v.cwtb", "v.cwtb+math.pow(2,t.i)"))),
+          ]))), set("t.i", "t.i+1"),
       ]),
       // Wind exposure one block up: +x, +z, -x, -z neighbours and the ceiling.
       [14, 16, 12, 10].map((n, d) => set("v.cwj" + d, bit(n))), set("v.cwce", bit(18)),
-      set("v.cwfl", `q.block_has_any_tag(t.ex,t.ey-1,t.ez,${SOLID})?(t.ey-v.cwby)*${num(PX)}+${num(MARGIN)}:-1000000`),
       // Cell origin of the ring in sim pixels, for the per-particle lookup.
       AX.map(a => set("v.cwo" + a, `(t.e${a}-v.cwb${a})*${num(PX)}`)),
     ]),
+    // Ground contact gives an observed surface for snow, slabs, stairs, beds,
+    // fences, etc. Update within a cell too; airborne queries use the cached floor.
+    when("v.cp_grounded", set("v.cwfl", `(${feetY}-v.cwby)*${num(PX)}+${num(MARGIN)}`)),
     // Fluids, every tick while the player is in one (q.is_in_contact_with_water also counts
     // rain): the surface is 0.9 above the highest wet cell of the feet cell and the two above;
     // particles below it get drag and buoyancy.
@@ -142,7 +163,6 @@ function env() {
         set("v.cwfd", `t.lv?${LAVA_DRAG}:${WATER_DRAG}`), set("v.cwfg", `t.lv?${LAVA_G}:${WATER_G}`),
       ], set("v.cwfh", -1000000)),
       set("v.cwht", "math.clamp(v.cwht+(q.is_on_fire?0.1:-0.05),0,1)"),
-      set("v.cwbn", `math.clamp(v.cwbn+(q.is_on_fire?${num(BURN_RATE / 20)}:-${num(REGROW_RATE / 20)}),0,${BURN_ROWS})`),
       set("v.cwsg", "v.cwtb+v.cwwe*1048576+(v.cwht>0)*2097152"),
     ]),
   ];
@@ -253,7 +273,7 @@ const legSig = ["t.rd+t.rnz", "t.ld+t.lnz"];
 // Blocks, fluids and wind are compared with their values at the last step.
 const wake = () => [...pinnedIds.flatMap(c => AX.map(a => `math.abs(${P(c, a)}-${AN(c, a)})`)),
   `math.abs(${legSig[0]}-v.cwrs)`, `math.abs(${legSig[1]}-v.cwls)`, "math.abs(v.cwsg-v.cwss)",
-  "math.abs(v.cwnx-v.cwsx)", "math.abs(v.cwnz-v.cwsz)"].join("+") + `>${num(WAKE_EPS)}||t.vn||v.cwht>0`;
+  "math.abs(v.cwnx-v.cwsx)", "math.abs(v.cwnz-v.cwsz)"].join("+") + `>${num(WAKE_EPS)}||v.cp_platform!=v.cq_platform||t.vn||v.cwht>0||(v.cwbt>1&&v.cwbr>1.25&&v.cwbr<1.55)`;
 
 function step() {
   return [
@@ -261,13 +281,15 @@ function step() {
     set("t.k", "v.cwh>0?math.clamp(t.h/v.cwh,0.5,2):0"), set("v.cwh", "t.h"),
     hemProbe.map(i => AX.map(a => set("t.w" + key(i) + a, P(i, a)))),
     set("t.dm", `math.exp(-${num(DRAG)}*t.h)`), set("t.gh", `${num(GRAVITY)}*t.h*t.h`),
-    set("t.fh", `v.cwsp*${num(FLUTTER)}*t.h*t.h`), set("t.tp", "math.mod(q.life_time,40)*900"),
+    // One gentle outward pulse for shedding embers, applied to the shared grid.
+    set("t.puff", "v.cwbt>1?math.sin(math.clamp((v.cwbr-1.25)/0.3,0,1)*180):0"),
+    set("t.fh", `(v.cwsp*${num(FLUTTER)}+100*t.puff)*t.h*t.h`), set("t.tp", "math.mod(q.life_time,40)*900"),
     // Wind as a per-step displacement; fluid drag and the buoyancy-reduced gravity.
     set("t.wx", `v.cwnx*${num(PX)}*t.h`), set("t.wz", `v.cwnz*${num(PX)}*t.h`),
     set("t.fd", "math.pow(v.cwfd,t.h*60)"), set("t.gw", "v.cwfg*t.gh"),
     set("t.gh", `t.gh*(1-${num(HEAT_LIFT)}*v.cwht)`),  // hot air rising takes weight off the cape
     // A wave running from the shoulders to the hem, nearly in phase across a row.
-    free.map(({ i, r, c }) => set("t.fq" + key(i), `math.sin(t.tp-${r * 50 + c * 8})*${num(r / ROWS)}`)),
+    free.map(({ i, r, c }) => set("t.fq" + key(i), `(math.sin(t.tp-${r * 50 + c * 8})+t.puff)*${num(r / ROWS)}`)),
     set("t.j", 0),
     loop("t.n", [
       pinnedIds.map(c => AX.map(a => set(P(c, a), `${P(c, a)}+(${AN(c, a)}-${P(c, a)})/(t.n-t.j)`))), set("t.j", "t.j+1"),
@@ -307,7 +329,7 @@ function step() {
     set("t.mv", `(${hemProbe.map(i => AX.map(a => `math.abs(${P(i, a)}-t.w${key(i)}${a})`).join("+")).join("+")})/t.n`),
     set("v.cwqt", `t.mv<${num(SLEEP_EPS)}?v.cwqt+1:0`),
     set("v.cwrs", legSig[0]), set("v.cwls", legSig[1]),
-    set("v.cwss", "v.cwsg"), set("v.cwsx", "v.cwnx"), set("v.cwsz", "v.cwnz"),
+    set("v.cwss", "v.cwsg"), set("v.cq_platform", "v.cp_platform"), set("v.cwsx", "v.cwnx"), set("v.cwsz", "v.cwnz"),
   ];
 }
 // Rows CLAMP_ROW.. collide in one shared loop (the per-particle code would not fit): load the
@@ -325,10 +347,14 @@ function contacts() {
   // Molang's math.min takes exactly two arguments (a three-argument call broke the whole
   // expression in game), so the lowest hem probe is nested.
   const gap = num(WALL_GAP), px = num(PX), low = hemProbe.map(i => P(i, "y")).reduce((a, b) => `math.min(${a},${b})`);
-  return when(`v.cwtb>0||t.vn||${low}<v.cwfl+4`, [set("t.ci", 0), loop(colliders.length, [
+  return when(`v.cwtb>0||v.cp_platform>0||t.vn||${low}<v.cwfl+4`, [set("t.ci", 0), loop(colliders.length, [
     AX.map(a => [set("t.p" + a, choose("t.ci", colliders.map(i => P(i, a)))), set("t.q" + a, choose("t.ci", colliders.map(i => Q(i, a))))]),
     set("t.ch", 0), AX.map(a => set("t.za" + a, `math.floor((t.p${a}-v.cwo${a})/${px})`)),
-    when("math.abs(t.zax)<2&&math.abs(t.zaz)<2&&t.zay>=0&&t.zay<2&&math.mod(math.floor(v.cwtb/math.pow(2,(t.zay*3+t.zaz+1)*3+t.zax+1)),2)", [
+    when("math.abs(t.zax)<2&&math.abs(t.zaz)<2&&t.zay>=0&&t.zay<2", [
+      set("t.bit", "math.pow(2,(t.zay*3+t.zaz+1)*3+t.zax+1)"),
+      when(`v.cp_platform&&math.mod(math.floor(v.cp_platform/t.bit),2)&&t.qy>=v.cwoy+(t.zay+1)*${px}`,
+        [set("t.py", `v.cwoy+(t.zay+1)*${px}+${gap}`), set("t.ch", 1)]),
+      when("math.mod(math.floor(v.cwtb/t.bit),2)", [
       AX.map(a => set("t.zb" + a, `math.floor((t.q${a}-v.cwo${a})/${px})`)),
       set("t.zf", "t.zbx==t.zax&&t.zby==t.zay&&t.zbz==t.zaz"),
       AX.map(a => set("t.zb" + a, `t.zf?0:t.zb${a}`)),
@@ -337,7 +363,7 @@ function contacts() {
       AX.map(a => [set("t.zc" + a, `t.zb${a}>t.za${a}?v.cwo${a}+(t.za${a}+1)*${px}+${gap}:t.zb${a}<t.za${a}?v.cwo${a}+t.za${a}*${px}-${gap}:t.p${a}`),
         set("t.zd" + a, `t.zb${a}==t.za${a}?1000000:math.abs(t.zc${a}-t.p${a})`)]),
       set("t.zm", "math.min(t.zdx,math.min(t.zdy,t.zdz))"), AX.map(a => when(`t.zd${a}==t.zm`, set("t.p" + a, "t.zc" + a))),
-      set("t.ch", 1)]),
+      set("t.ch", 1)])]),
     when("t.py<v.cwfl", [set("t.py", "v.cwfl"), set("t.ch", 1)]),
     when("t.vn", [set("t.yx", "t.px-t.vcx"), set("t.yz", "t.pz-t.vcz"), set("t.yd", "math.sqrt(t.yx*t.yx+t.yz*t.yz)"),
       when(`t.yd<${num(VIEWER_R * PX)}&&t.yd>0.001&&t.py>t.vcy&&t.py<t.vcy+${num(VIEWER_H * PX)}`,
@@ -363,6 +389,7 @@ function cell(r, c) {
     AX.map(a => set("t.m" + a, `(${cv(A, a)}+${cv(B, a)}+${cv(C, a)}+${cv(D, a)})*.25`)),
     AX.map(a => set("t.h" + a, `(${cv(B, a)}-${cv(A, a)}+${cv(D, a)}-${cv(C, a)})*${num(1 / (2 * W))}`)),
     AX.map(a => set("t.i" + a, `(${cv(A, a)}-${cv(C, a)}+${cv(B, a)}-${cv(D, a)})*${num(1 / (2 * H))}`)),
+    r >= ROWS - BURN_ROWS ? [set(CV(r, c, "sz"), 1), when(burning, burnCell(r, c, H, CV(r, c, "sz")))] : [],
     set("t.la", "math.max(math.sqrt(t.hx*t.hx+t.hy*t.hy+t.hz*t.hz),0.0001)"),
     AX.map(a => set("t.f" + a, `t.h${a}/t.la`)),
     set("t.lb", "t.ix*t.fx+t.iy*t.fy+t.iz*t.fz"),
@@ -389,8 +416,8 @@ export function initDefaults() {
   const text = toMolang(body()) + channels().map(ch => toMolang(ch.nodes) + ch.value).join("");
   // Cell outputs (v.cc) and body-local particles (v.cu) are only read behind ?? or after
   // being written in the same expression, so they need no defaults.
-  const names = [...new Set([...text.matchAll(/\bv\.(c[wpq][a-z0-9]*)/g)].map(m => m[1]))].filter(n => n !== "cwin");
-  return Object.fromEntries(names.sort().map(n => [n, n === "cwlt" ? -1 : 0]));
+  const names = [...new Set([...text.matchAll(/\bv\.(c[wpq][a-z0-9_]*)/g)].map(m => m[1]))].filter(n => n !== "cwin");
+  return Object.fromEntries(names.sort().map(n => [n, n === "cwlt" ? -1 : n === "cwbr" ? 4.2 : 0]));
 }
 
 export const program = () => flat(
@@ -409,7 +436,7 @@ function body() {
         // v.cwlt guards against a second evaluation in the same frame; v.cwst counts the
         // frames that moved the cloth, and bone channels only recompute when it changes.
         when("q.life_time!=v.cwlt", [
-          set("v.cwlt", "q.life_time"), origin(), env(), wind(),
+          set("v.cwlt", "q.life_time"), origin(), env(), burnClock(), wind(),
           when("t.sr", set("v.cwac", 0)), schedule(),
           when("t.sr||t.n>0", [frame(),
             // Asleep: skip the step (the cells stay cached) until an anchor or a leg moves.
@@ -433,7 +460,10 @@ export function channels() {
   each((r, c) => {
     const n = boneNames(r, c), f = k => CV(r, c, k);
     // Reads here use ?? so a channel evaluated before the first anim_time_update cannot error.
-    const nodes = flat(when(`(v.cwon??0)&&(${f("lt")}??-1)!=(v.cwst??-2)`, [cell(r, c), set(f("lt"), "v.cwst")]));
+    const burnable = r >= ROWS - BURN_ROWS;
+    const refresh = burnable ? `||(${burning})&&(${f("ft")}??-1)!=q.life_time` : "";
+    const nodes = flat(when(`(v.cwon??0)&&((${f("lt")}??-1)!=(v.cwst??-2)${refresh})`,
+      [cell(r, c), set(f("lt"), "v.cwst"), burnable ? set(f("ft"), "q.life_time") : []]));
     const add = (bone, channel, axis, field, off) => list.push({ bone, channel, axis, r, c, field, nodes,
       value: `(v.cwon??0)?(${f(field)}??${off}):${off}` });
     const dy = num(restY(r) - H / 2 - 24), vr = "(6+126*q.cape_flap_amount)";
@@ -441,6 +471,7 @@ export function channels() {
     ["px", "py", "pz"].forEach((k, axis) => add(n.outer, "position", axis, k,
       [0, `${dy}*(math.cos(${vr})-1)`, `((v.cwaz??0)-${dy}*math.sin(${vr}))`][axis]));
     add(n.mid, "scale", 0, "sx", 1); add(n.mid, "scale", 1, "sy", 1);
+    if (burnable) add(n.mid, "scale", 2, "sz", 1);
     add(n.mesh, "rotation", 2, "iz", 0);
   });
   return list;
@@ -480,9 +511,12 @@ export function geometry() {
     // Bedrock names faces in mirrored x: "east" is the -x side, "west" the +x side (in game,
     // a "west" face on the leftmost column was hidden inside the cape). _sample's turned cape
     // puts its u 0 strip on our +x edge and the u 11 strip on our -x edge.
-    if (c === 0) uv.east = { uv: [11, vt], uv_size: [1, round(h)] };
-    if (c === COLS - 1) uv.west = { uv: [0, vt], uv_size: [1, round(h)] };
-    if (r === 0) uv.up = { uv: [round(6 - x0 + L), 0], uv_size: [round(-w), 1] };
+    // Detaching tiles expose previously internal faces. Close those existing
+    // cubes with the cape's edge texels; do not add geometry or enlarge overlap.
+    const detachable = r >= ROWS - BURN_ROWS;
+    if (c === 0 || detachable) uv.east = { uv: [11, vt], uv_size: [1, round(h)] };
+    if (c === COLS - 1 || detachable) uv.west = { uv: [0, vt], uv_size: [1, round(h)] };
+    if (r === 0 || detachable) uv.up = { uv: [round(6 - x0 + L), 0], uv_size: [round(-w), 1] };
     uv.down = { uv: [round(16 - x0 + L), 0], uv_size: [round(-w), 1] };  // every row: a burnt hem shows a closed edge
     list.push({ name: n.outer, parent: "body", pivot }, { name: n.mid, parent: n.outer, pivot },
       { name: n.mesh, parent: n.mid, pivot, cubes: [{ origin: [round(x0 - L), round(y1 - H - B), 2], size: [round(w), round(h), 1], uv }] });
@@ -493,15 +527,17 @@ export function geometry() {
     bones: list }] };
 }
 
-// Row r of the cloth is gone once the hem has burnt past it (variable.cwbn rows, unset = 0).
-export const burnShows = r => `(variable.cwbn ?? 0) < ${ROWS - r}`;
-
 // Same visibility rule as _sample, applied to every cube bone.
 export function renderController() {
   const show = "query.armor_texture_slot(1) != 5 && (!variable.is_first_person || variable.is_paperdoll) && !variable.map_face_icon && !query.is_spectator";
   return { format_version: "1.8.0", render_controllers: { "controller.render.player.cape": {
     rebuild_animation_matrices: true, geometry: "Geometry.cape", materials: [{ "*": "Material.cape" }], textures: ["Texture.cape"],
-    part_visibility: [Object.fromEntries(each((r, c) => [boneNames(r, c).mesh, r < ROWS - BURN_ROWS ? show : `${show} && ${burnShows(r)}`]))],
+    part_visibility: [Object.fromEntries(each((r, c) => {
+      const n = boneNames(r, c).mesh;
+      if (r < ROWS - BURN_ROWS) return [n, show];  // rows 0-2: always shown
+      // No flashing. Keep UI/paperdoll presentation independent of world burning.
+      return [n, `${show} && (!(v.cwon??0)||(${burnVar(r, c, "show")}??1))`];
+    }))],
     is_hurt_color: { r: 0, g: 0, b: 0, a: 0 } } } };
 }
 export const sections = () => ({ origin: origin(), frame: frame(), reset: reset(), step: step(), cell: cell(1, 1) });
