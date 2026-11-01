@@ -12,6 +12,8 @@ export { COLS, ROWS, W, H, pid, restX, restY } from "./grid.mjs";
 export const ZMID = 2.5;                 // cape mid-plane at rest (cube z 2..3)
 const PX = 16 / 0.9375;                  // model pixels per block at the vanilla player scale
 const MARGIN = 0.5, HIP_Y = 12;          // half thickness; legs only push rows below the hip
+const CHEST_CLEARANCE = 0.5;            // extra room for the fitted cloth over chest armour
+const CHEST_HEM_GUARD = 1;             // collision allowance, independent of visual overlap
 const envNum = (k, d) => process.env[k] === undefined ? d : Number(process.env[k]);  // tuning sweeps
 // Leg collider: half width of the column band each leg catches (4 = its whole side), margin
 // past the leg's back face, and the share of the leg's speed handed to the cape. Sweep with
@@ -83,22 +85,57 @@ const TORSO = ["t.g02", "t.g12", "t.g22"], RLEG = ["t.rnx", "t.rny", "t.rnz"], L
 // subtracts it too); everything here works from the feet.
 export const EYE = 1.62;
 const feetY = `(q.position(1)-${EYE})`;
-function origin() {
-  const e = k => k === 1 ? feetY : `q.position(${k})`;
+// A&S samples actual displacement over >0.1 s and smooths riding speed with
+// 1-exp(-6*dt). Its cape stops receiving movement after 0.1 s without a sample.
+// Preserve the full world-space velocity: A&S projects it onto the mount's
+// heading for pitch/roll; our body frame already converts all three axes.
+// Our particles need translation, rather than A&S's cape pitch: move the sim
+// base by raw displacement minus that smooth motion. This carries sampling
+// jumps with the rider without feeding them into cloth inertia. Terrain and
+// fluid caches follow the same base change, retaining their real world positions.
+function ridingOrigin(e) {
   return [
+    when('t.sr', [set('v.cwride_clock', 'q.life_time'), set('v.cwride_age', 0),
+      AX.map((a,k) => [set('v.cwp'+a, e(k)), set('v.cwl'+a, 0)]), set('v.cwvy', 0)]),
+    set('v.cwride_age', 't.j>0?0:v.cwride_age+q.delta_time'),
+    set('t.rs', 'q.life_time-v.cwride_clock'),
+    when('t.rs>0.1&&t.j>0', [
+      AX.map((a,k) => [set('v.cwl'+a, `(${e(k)}-v.cwp${a})/t.rs`), set('v.cwp'+a,e(k))]),
+      set('v.cwride_clock', 'q.life_time')]),
+    set('t.rf', '1-math.exp(-6*q.delta_time)'),
+    set('t.rm', 'v.cwride_age<0.1'),
+    AX.map((a,k) => [
+      set('v.cwv'+a, `math.lerp(v.cwv${a},v.cwl${a}*t.rm,t.rf)`),
+      when('!t.sr', [set('t.rc', `t.r${a}-v.cwc${a}-v.cwv${a}*q.delta_time`),
+        set('v.cwb'+a, `v.cwb${a}+t.rc`),
+        set('t.rc', `t.rc*${num(PX)}`), set('v.cwo'+a, `v.cwo${a}-t.rc`),
+        a==='y' ? [set('v.cwfl', 'v.cwfl-t.rc'), set('v.cwfh', 'v.cwfh-t.rc')] : []]),
+      set('v.cwc'+a,e(k))]),
+  ];
+}
+function origin() {
+  const e = k => 't.r'+AX[k];
+  return [
+    AX.map((a,k) => set('t.r'+a,k===1?feetY:`q.position(${k})`)),
     set("t.now", "math.floor(q.life_time*20+0.001)"),
     set("t.j", `math.abs(${e(0)}-v.cwcx)+math.abs(${e(1)}-v.cwcy)+math.abs(${e(2)}-v.cwcz)`),
     // Also reset far from the base so sim coordinates stay small (float precision).
-    set("t.sr", `!v.cwok||q.delta_time>0.25||t.j>8||math.abs(${e(0)}-v.cwbx)+math.abs(${e(2)}-v.cwbz)>${REBASE}`),
+    set("t.sr", `!v.cwok||q.is_riding!=v.cwride||q.delta_time>0.25||t.j>8||math.abs(${e(0)}-v.cwbx)+math.abs(${e(2)}-v.cwbz)>${REBASE}`),
+    set('v.cwride', 'q.is_riding'),
     set("t.tk", "t.sr||t.now!=v.cwtk"),  // a new game tick: per-tick sampling below
-    when("t.sr||t.now<v.cwtk||t.now-v.cwtk>1", [AX.map((a, k) => [set("v.cwp" + a, e(k)), set("v.cwc" + a, e(k))]), set("v.cwtk", "t.now")]),
-    when("t.now!=v.cwtk", [AX.map(a => set("v.cwp" + a, "v.cwc" + a)), set("v.cwtk", "t.now")]),
-    AX.map((a, k) => [set("v.cwc" + a, e(k)), set("t.r" + a, `math.lerp(v.cwp${a},v.cwc${a},math.clamp(q.frame_alpha,0,1))`)]),
-    when("t.sr", [AX.map(a => [set("v.cwb" + a, "t.r" + a), set("v.cwl" + a, "t.r" + a)]), set("v.cwvx", 0), set("v.cwvz", 0), set("v.cwh", 0)]),
+    when('v.cwride', ridingOrigin(e), [
+      when("t.sr||t.now<v.cwtk||t.now-v.cwtk>1", AX.map((a,k) => set('v.cwp'+a,e(k))),
+        when("t.now!=v.cwtk", AX.map(a => set("v.cwp" + a, "v.cwc" + a)))),
+      AX.map((a, k) => [set("v.cwc" + a, e(k)), set("t.r" + a, `math.lerp(v.cwp${a},v.cwc${a},math.clamp(q.frame_alpha,0,1))`)]),
+    ]),
+    set('v.cwtk', 't.now'),
+    when("t.sr", [AX.map(a => [set("v.cwb" + a, "t.r" + a), set("v.cwl" + a, `v.cwride?0:t.r${a}`)]), set("v.cwvx", 0), set("v.cwvz", 0), set("v.cwh", 0)]),
     AX.map(a => set("t.o" + a, `(t.r${a}-v.cwb${a})*${num(PX)}`)),
     // Smoothed horizontal body velocity (blocks/s); flutter follows the speed relative to the wind.
-    ["x", "z"].map(a => set("v.cwv" + a, `math.lerp(v.cwv${a},math.clamp((t.r${a}-v.cwl${a})/math.max(q.delta_time,0.001),-8,8),math.clamp(q.delta_time*8,0,1))`)),
-    AX.map(a => set("v.cwl" + a, "t.r" + a)),
+    when('!v.cwride', [
+      ["x", "z"].map(a => set("v.cwv" + a, `math.lerp(v.cwv${a},math.clamp((t.r${a}-v.cwl${a})/math.max(q.delta_time,0.001),-8,8),math.clamp(q.delta_time*8,0,1))`)),
+      AX.map(a => set("v.cwl" + a, "t.r" + a)),
+    ]),
   ];
 }
 
@@ -369,7 +406,9 @@ function contacts() {
     when('t.active>0.001',[
       set('t.ch',0),set('t.qh',0),
       when('t.ci>=18',set('t.ly','t.g01*(t.px-t.bx)+t.g11*(t.py-t.by)+t.g21*(t.pz-t.bz)')),
-      when(`t.ci<${3*(COLS+1)}||t.ly>${HIP_Y-24}`,localPlane(TORSO,'t.td'),[
+      // Preserve the armoured waist's collision guard independently of visual
+      // overlap so reducing the overlap cannot expose the chestplate hem.
+      when(`t.ci<${3*(COLS+1)}||t.ly>${HIP_Y-24}-v.cwaz-(v.cwaz>0?${num(CHEST_HEM_GUARD)}:0)`,localPlane(TORSO,'t.td'),[
         set('t.lx',`-5+math.mod(t.ci,${COLS+1})*${W}`),
         when(`math.abs(t.lx+1.9)<${LEG_HALF}`,localPlane(RLEG,'t.rd',true)),
         when(`math.abs(t.lx-1.9)<${LEG_HALF}`,localPlane(LLEG,'t.ld',true))]),
@@ -397,10 +436,25 @@ function contacts() {
     ]),set('t.ci','t.ci+1')])];
 }
 
-// A free particle back into body-local coordinates (G is orthonormal, so G^-1 = G^T).
-// Runs inside bone channels, once per particle per frame behind its own stamp.
-const toLocal = i => when(`(v.cu${key(i)}t??-1)!=v.cwst`, [AX.map(a => set("t.d" + a, `${P(i, a)}-v.cwk${a}`)),
-  AX.map((a, k) => set(U(i, a), `v.cwg0${k}*t.dx+v.cwg1${k}*t.dy+v.cwg2${k}*t.dz${a === "y" ? "+24" : ""}`)), set(`v.cu${key(i)}t`, "v.cwst")]);
+// All incident tiles share this display vertex. A small spatial fairing removes
+// sharp per-cell kinks before fitting cuboids; it never changes solver particles.
+// Limit displacement to half a texture pixel. Missing/burning links contribute
+// no cross-gap smoothing, and unequal row heights retain affine/rest positions.
+export const MESH_FAIR = envNum('MESH_FAIR', 0.4), MESH_LIMIT = 0.5;
+function toLocal(i) {
+  const r=Math.floor(i/(COLS+1)), c=i%(COLS+1), left=i-1, right=i+1, up=i-COLS-1, down=i+COLS+1;
+  const horizontal=c>0&&c<COLS, vertical=r<ROWS;
+  const strength=(a,b,c) => `math.min(${linkStrength(a,b)},${linkStrength(b,c)})*${num(MESH_FAIR)}`;
+  return when(`(v.cu${key(i)}t??-1)!=v.cwst`, [
+    set('t.wx',horizontal?strength(left,i,right):0), set('t.wz',vertical?strength(up,i,down):0),
+    AX.map(a => set('t.s'+a,
+      (horizontal?`((${P(left,a)}+${P(right,a)})*.5-${P(i,a)})*t.wx`:'0')+
+      (vertical?`+((${P(up,a)}*${num(H(r))}+${P(down,a)}*${num(H(r-1))})/${num(H(r)+H(r-1))}-${P(i,a)})*t.wz`:''))),
+    set('t.e',`math.min(1,${num(MESH_LIMIT)}/math.max(math.sqrt(t.sx*t.sx+t.sy*t.sy+t.sz*t.sz),0.0001))`),
+    AX.map(a => set('t.d'+a,`${P(i,a)}+t.s${a}*t.e-v.cwk${a}`)),
+    AX.map((a,k) => set(U(i,a),`v.cwg0${k}*t.dx+v.cwg1${k}*t.dy+v.cwg2${k}*t.dz${a==='y'?'+24':''}`)),
+    set(`v.cu${key(i)}t`,'v.cwst')]);
+}
 
 // Each cell is a parallelogram fitted to its four corners: outer bone = rotation U and
 // offset, middle bone = in-plane scale, inner bone = in-plane rotation (closed-form 2x2 SVD).
@@ -450,12 +504,18 @@ export const program = () => flat(
   when("!(v.cwin??0)", [Object.entries(initDefaults()).map(([n, x]) => set("v." + n, x)), set("v.cwin", 1)]),
   body());
 
-// UI and paperdoll passes only read v.cwon=0 and render the rest pose; they never touch sim state.
+// UI and paperdoll use their geometry's locator offset and the rest pose.
+// Equipment queries require an actor and must stay inside the world-only branch.
 function body() {
   return flat(
     set("v.cwaz", "q.get_root_locator_offset('armor_offset.default_neck',1)"),
     set("v.cwon", 0),
     when("!q.is_in_ui&&!(v.is_paperdoll??0)", [
+      // A&S reaches chest slot 1 through its equipment controller. Our cape
+      // animation also runs in actorless previews, so guard the call here.
+      // The locator alone can stay zero while wearing armour; keep guaranteed
+      // chestplate room shared by the collar and collision in world passes.
+      set("v.cwaz", `math.max(v.cwaz+(v.cwaz>0?${num(CHEST_CLEARANCE)}:0),q.has_armor_slot(1)?${num(1+CHEST_CLEARANCE)}:0)`),
       // A&S also guards bone queries against a clock rollback. A cosmetic reload
       // can retain our variables while rebuilding geometry: rearm the existing
       // 0.1 s warmup before querying it again. UI passes never touch this clock.
@@ -521,19 +581,22 @@ export function bones() {
 // outer (south) face u = 6 - x and inner (north) face u = 17 + x across the cape (south u
 // runs toward -x, north toward +x), and the 1px top/bottom strips are the sample's turned
 // by 180° (u and v both flipped). Side strips: see the east/west note below.
-// Each cell reaches OVERLAP px past its interior edges into its neighbours, with the UVs
+// Each cell reaches past its interior edges into its neighbours, with the UVs
 // extended by the same amount, so the overlap shows the neighbour's own texels (invisible
 // when flat) and covers the cracks a bend or an imperfect parallelogram fit opens.
 // The cape's outer border is never extended. Pivots and the fit stay on the rest cell.
-export const OVERLAP = envNum("OVERLAP", 0.75);  // sweep: 0.5 left 3.4% cracked frames (leg swing), 0.6 none; 0.75 for margin
+// With shared, faired display vertices the long overlapping plates are no longer
+// needed. Rows mostly bend along the cape, so their overlap is smaller than the
+// side allowance needed for sideways shear. Keep the original one-pixel thickness.
+export const OVERLAP = envNum("OVERLAP", 0.75);
 // Only ONE variant per tile is rendered. Variants bake the optional side overlap
 // into both the cube and UV rectangle; switching cannot squash/stretch texels.
 // Vertical overlap closes both sides while attached; the upper tile retracts
 // its bottom overlap as soon as the lower tile is gone, leaving an integer burn edge.
-export const TOP_OVERLAP = OVERLAP;
+export const TOP_OVERLAP = envNum('ROW_OVERLAP', 0.4);
 export function meshVariants(r,c) {
   const masks = [0,1,2,3].filter(m => (c>0||!(m&1))&&(c<COLS-1||!(m&2)));
-  const list = masks.flatMap(code=>(r<ROWS-1?[0,8]:[0]).map(bottom=>({code:code+bottom,L:code&1?OVERLAP:0,R:code&2?OVERLAP:0,T:r>0?TOP_OVERLAP:0,B:bottom?OVERLAP:0})));
+  const list = masks.flatMap(code=>(r<ROWS-1?[0,8]:[0]).map(bottom=>({code:code+bottom,L:code&1?OVERLAP:0,R:code&2?OVERLAP:0,T:r>0?TOP_OVERLAP:0,B:bottom?TOP_OVERLAP:0})));
   if(r>0) list.push({code:4,L:0,R:0,T:0,B:0});
   return list;
 }

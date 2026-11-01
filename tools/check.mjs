@@ -2,7 +2,7 @@
 // seams, parallelogram fit, stretch, lift and UI isolation. It verifies our own math
 // and logic only; Bedrock's real transform conventions still need the in-game test.
 import assert from "node:assert/strict";
-import { program, channels, initDefaults, pid, restX, restY, COLS, ROWS, W, H, ZMID, OVERLAP, TOP_OVERLAP, bones, renderController, CLAMP_ROW } from "./cloth.mjs";
+import { program, channels, initDefaults, pid, restX, restY, COLS, ROWS, W, H, ZMID, OVERLAP, TOP_OVERLAP, MESH_LIMIT, bones, renderController, CLAMP_ROW } from "./cloth.mjs";
 import { toMolang, compileJs, jsReturn, MATH, strict, checkMolang, compactNames } from "./molang.mjs";
 import { burnVar } from './burn.mjs';
 
@@ -38,8 +38,8 @@ function seamBox(cl,r,c,v) {
     return [0,1,2].map(j=>inner[0][j]*local[0]+inner[1][j]*local[1]+inner[2][j]*local[2]+pivot[j]);
   };
   const mask=v.__opt('cc'+key(r*COLS+c)+'variant')??((c>0?1:0)+(c<COLS-1?2:0)+(r<ROWS-1?8:0));
-  const lo=[restX(c)-(mask&1?OVERLAP:0),restY(r+1)-(mask&8?OVERLAP:0),2],hi=[restX(c+1)+(mask&2?OVERLAP:0),restY(r)+(r?TOP_OVERLAP:0),3];
-  return (p,q)=>{
+  const lo=[restX(c)-(mask&1?OVERLAP:0),restY(r+1)-(mask&8?TOP_OVERLAP:0),2],hi=[restX(c+1)+(mask&2?OVERLAP:0),restY(r)+(r?TOP_OVERLAP:0),3];
+  const interval = (p,q)=>{
     const a=transform(p),b=transform(q);let enter=0,exit=1;
     for(let k=0;k<3;k++) {
       const d=b[k]-a[k];
@@ -48,9 +48,18 @@ function seamBox(cl,r,c,v) {
     }
     return [enter,exit];
   };
+  return Object.assign(interval,{lo,hi});
 }
 const corner = (r, c) => [restX(c), restY(r), ZMID];
-const particle = (v, r, c, az) => r === 0 ? [restX(c), 24, ZMID + az] : ["x", "y", "z"].map(a => v[`cu${key(pid(r, c))}${a}`]);
+// The collar includes the armour clearance; the query's raw locator offset
+// alone is no longer its rendered position.
+// Measure actual solver points separately from the shared faired display mesh.
+const particle = (v, r, c, az) => {
+  if(r===0)return [restX(c),24,ZMID+v.cwaz];
+  const d=['x','y','z'].map(a=>v[`cp${key(pid(r,c))}${a}`]-v['cwk'+a]);
+  return [0,1,2].map(k=>v['cwg0'+k]*d[0]+v['cwg1'+k]*d[1]+v['cwg2'+k]*d[2]+(k===1?24:0));
+};
+const displayPoint = (v,r,c) => r===0?[restX(c),24,ZMID+v.cwaz]:['x','y','z'].map(a=>v[`cu${key(pid(r,c))}${a}`]);
 
 // Mock worlds: solid(x,y,z) on integer block cells, an optional water surface height, rain.
 // "room" (floor at y 63, roof from y 66) keeps the original cases indoors and windless.
@@ -72,7 +81,11 @@ function query(s) {
   return {
     // q.position(1) is the player's eye, 1.62 above the feet, as in game.
     life_time: () => s.time, delta_time: () => s.dt, frame_alpha: () => s.alpha, position: k => s.pos[k] + (k === 1 ? 1.62 : 0),
-    body_y_rotation: () => s.yaw, bone_orientation_trs: name => s.bones[name], get_root_locator_offset: () => s.armorZ,
+    body_y_rotation: () => s.yaw, is_riding: () => 0, bone_orientation_trs: name => s.bones[name], get_root_locator_offset: () => s.armorZ,
+    has_armor_slot: slot => {
+      assert.ok(!s.ui && !s.noEntity, 'query.has_armor_slot requires entity context');
+      return +(slot === 1 && (s.chestplate ?? s.armorZ > 0));
+    },
     has_cape: () => 1, is_in_ui: () => s.ui, is_spectator: () => 0, is_item_name_any: () => 0, is_on_ground: () => +(s.grounded ?? true),
     time_stamp: () => s.stamp ?? 0, is_in_water: () => +wet(...P), is_in_contact_with_water: () => +wet(P[0], P[1] - 0.1, P[2]),
     is_in_lava: () => 0, is_in_water_or_rain: () => +(wet(...P) || (!!w.rain && !roofed)),
@@ -106,8 +119,39 @@ function affineTest() {
   let err = 0;
   for (let r = 1; r < ROWS; r++) for (let c = 0; c < COLS; c++)
     for (const [dr, dc] of [[0, 0], [0, 1], [1, 0], [1, 1]])
-      err = Math.max(err, len(sub(place(cells[`${r},${c}`], r, c, corner(r + dr, c + dc)), particle(v, r + dr, c + dc, 0))));
+        err = Math.max(err, len(sub(place(cells[`${r},${c}`], r, c, corner(r + dr, c + dc)), ['x','y','z'].map(a=>v[`cu${key(pid(r+dr,c+dc))}${a}`]))));
   return err;
+}
+
+// Exercise the display conversion itself: flat/affine cloth must stay exact,
+// including the unequal shoulder row, and missing fabric must not pull its edge.
+function displayMeshTest() {
+  const make = () => {
+    const v = strict({ ...initDefaults(), cwin: 1, cwon: 1, cwlt: 1, cwst: 1, cwaz: 0 });
+    for (const a of ['x', 'y', 'z']) v['cwk' + a] = 0;
+    for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) v['cwg' + r + c] = +(r === c);
+    for (let r = 1; r < ROWS; r++) for (let c = 0; c < COLS; c++) v['ct' + key(r * COLS + c)] = 1;
+    for (let r = 0; r <= ROWS; r++) for (let c = 0; c <= COLS; c++) {
+      // An affine plane that keeps the collar fixed.
+      const dy = restY(r) - 24, p = [restX(c) + 0.35 * dy, 0.85 * dy, ZMID - 0.2 * dy];
+      ['x', 'y', 'z'].forEach((a, k) => v['cp' + key(pid(r, c)) + a] = p[k]);
+    }
+    return v;
+  };
+  const q = query({ ui: 0 }), v = make();
+  evalChannels(v, q);
+  for (let r = 1; r <= ROWS; r++) for (let c = 0; c <= COLS; c++)
+    assert.ok(len(sub(displayPoint(v, r, c), particle(v, r, c))) < 1e-8, 'display fairing preserves an affine surface');
+  const cut = make(), changed = make();
+  for (const state of [cut, changed])
+    for (let r = 2; r < ROWS; r++) for (let c = 0; c < COLS; c++) state['ct' + key(r * COLS + c)] = 0;
+  // The next row belongs entirely to burnt fabric. Moving it cannot pull on
+  // the surviving edge at row 2, even while its hidden particles still exist.
+  for (let c = 0; c <= COLS; c++) changed['cp' + key(pid(3, c)) + 'z'] += 20;
+  evalChannels(cut, q); evalChannels(changed, q);
+  for (let c = 0; c <= COLS; c++)
+    assert.deepEqual(displayPoint(cut, 2, c), displayPoint(changed, 2, c), 'burnt neighbours cannot affect the surviving edge');
+  return 'ok';
 }
 
 // Scripted player: stand, walk, sprint, sharp turn, stop, sneak, jump, teleport.
@@ -122,10 +166,10 @@ function motion(t) {
 
 function run(opt) {
   const { fps, seconds = 14, armorZ = 0, scenario = motion, world = ROOM, stamp = 0 } = opt;
-  const v = strict({}), s = { ui: 0, armorZ, world };
+  const v = strict({}), s = { ui: 0, armorZ, world, chestplate: opt.chestplate };
   let t = 0, dt = 1 / fps;
   let path = [0, 64 + (opt.floorOffset ?? 0), 0], phase = 0, tickPrev = null, tickCur = null, tick = -1, lagged = null;
-  const m = { nan: 0, uiLeak: 0, seam: 0, fit: 0, stretch: 0, extension: 0, crack:0, restDrift: 0, lift: [], jumpPx: 0, prevU: null, series: {}, kick: 0, legClip: 0 };
+  const m = { nan: 0, uiLeak: 0, seam: 0, fit: 0, stretch: 0, extension: 0, crack:0, ridge:0, meshOffset:0, physicsFit:0, restDrift: 0, lift: [], jumpPx: 0, prevU: null, series: {}, kick: 0, legClip: 0 };
   for (let f = 0; t < seconds; f++, t += dt) {
     dt = (1 + (opt.jitter ?? 0) * Math.sin(f * 2.39996)) / fps;
     const mo = scenario(t);
@@ -152,6 +196,8 @@ function run(opt) {
     const before = JSON.stringify(Object.entries(v).filter(([k]) => !["cwon", "cwaz"].includes(k)));
     s.ui = 1; prog(v, query(s), MATH); evalChannels(v, query(s)); s.ui = 0;
     if (JSON.stringify(Object.entries(v).filter(([k]) => !["cwon", "cwaz"].includes(k))) !== before) m.uiLeak++;
+    // Restore this pass's model offset and output gate before measuring world geometry.
+    prog(v, query(s), MATH);
 
     if (Object.values(cells).some(cl => Object.values(cl).some(x => !Number.isFinite(x)))) m.nan++;
     if (!v.cwok) { m.prevU = null; continue; }  // warm-up: the cape is drawn at rest, nothing simulated yet
@@ -165,7 +211,7 @@ function run(opt) {
     if (opt.env && t > e0 && t < e1) {
       // World heights from the harness truth: remove the code's own feet-height error.
       const bias = v.cwcy - s.pos[1];
-      const hem = [...Array(COLS + 1).keys()].map(c => sub(particle(v, ROWS, c, armorZ), [restX(c), restY(ROWS), ZMID + armorZ]));
+      const hem = [...Array(COLS + 1).keys()].map(c => sub(particle(v, ROWS, c, armorZ), [restX(c), restY(ROWS), ZMID + v.cwaz]));
       m.envN = (m.envN ?? 0) + 1;
       m.deflect = (m.deflect ?? 0) + hem.reduce((n, d) => n + len(d), 0) / hem.length;
       m.hemUp = (m.hemUp ?? 0) + hem.reduce((n, d) => n + d[1], 0) / hem.length;
@@ -201,8 +247,12 @@ function run(opt) {
       }
     }
     const pt = (r, c) => particle(v, r, c, armorZ);
-    const total = { seam: m.seam, fit: m.fit, stretch: m.stretch, extension:m.extension,crack:m.crack };
-    m.seam = m.fit = m.stretch = m.extension = m.crack = 0;
+    const total = { seam: m.seam, fit: m.fit, stretch: m.stretch, extension:m.extension,crack:m.crack,ridge:m.ridge };
+    m.seam = m.fit = m.stretch = m.extension = m.crack = m.ridge = 0;
+    for(let r=1;r<=ROWS;r++)for(let c=0;c<=COLS;c++) {
+      const drawn=['x','y','z'].map(a=>v[`cu${key(pid(r,c))}${a}`]);
+      m.meshOffset=Math.max(m.meshOffset,len(sub(drawn,pt(r,c))));
+    }
     // An ash or an unfolding tile intentionally leaves its original four corners.
     // Measure intact cloth here; check-burn.mjs checks the animated edge/ash frame.
     const intact = (r, c) => !(v.__opt(burnVar(r, c, 's').slice(2)) ?? 0);
@@ -211,7 +261,10 @@ function run(opt) {
       const cl = cells[`${r},${c}`];
       for (const [dr, dc] of [[0, 0], [0, 1], [1, 0], [1, 1]]) {
         const p = place(cl, r, c, corner(r + dr, c + dc));
-        m.fit = Math.max(m.fit, len(sub(p, pt(r + dr, c + dc))));
+        // Fit accuracy refers to the shared display mesh. Record physical
+        // deviation separately so smoothing cannot hide solver deformation.
+        m.fit = Math.max(m.fit, len(sub(p, displayPoint(v,r+dr,c+dc))));
+        m.physicsFit = Math.max(m.physicsFit,len(sub(p,pt(r+dr,c+dc))));
         // Same corner as rendered by the neighbouring cells.
         for (const [nr, nc] of [[r + dr - 1, c + dc - 1], [r + dr - 1, c + dc], [r + dr, c + dc - 1], [r + dr, c + dc]])
           if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS && (Math.abs(nr-r)+Math.abs(nc-c)===1) && intact(nr, nc))
@@ -229,6 +282,19 @@ function run(opt) {
           const gap=Math.max(0,ib[0]-ia[1])*len(sub(a,b));
           if(ia[0]>1e-3||ib[1]<0.999)throw new Error('seam interval endpoint mismatch');
           m.crack=Math.max(m.crack,gap);
+          // Protrusion of an extended edge beyond its neighbour's surface,
+          // on both faces. A watertight overlap can still look like a raised plate.
+          const ca=cells[r+','+c],cb=cells[nr+','+nc],ba=boxes[r+','+c],bb=boxes[nr+','+nc];
+          const pa=p=>place(ca,r,c,p),pb=p=>place(cb,nr,nc,p);
+          const na=sub(pa([...rest.slice(0,2),3]),pa([...rest.slice(0,2),2]));
+          const nb=sub(pb([...rest.slice(0,2),3]),pb([...rest.slice(0,2),2]));
+          const dot=(a,b)=>a.reduce((n,x,k)=>n+x*b[k],0);
+          for(const sign of [-1,1]) {
+            const face=[...rest];face[2]+=sign*.5;
+            const ea=[...face],eb=[...face],axis=nc>c?0:1;
+            ea[axis]=nc>c?ba.hi[0]:ba.lo[1];eb[axis]=nc>c?bb.lo[0]:bb.hi[1];
+            m.ridge=Math.max(m.ridge,sign*dot(nb,sub(pa(ea),pb(face))),sign*dot(na,sub(pb(eb),pa(face))));
+          }
         }
       }
     }
@@ -238,9 +304,9 @@ function run(opt) {
       if(c<COLS&&r>0&&Math.max(attachment(r-1,c),attachment(r,c))>0.99)strain(len(sub(pt(r,c+1),pt(r,c))),W);
       if(r<ROWS&&Math.max(attachment(r,c-1),attachment(r,c))>0.99)strain(len(sub(pt(r+1,c),pt(r,c))),H(r));
     }
-    for (const k of ["seam", "fit", "stretch", "extension", "crack"]) { (m.series[k] ??= []).push(m[k]); m[k] = Math.max(total[k], m[k]); }
+    for (const k of ["seam", "fit", "stretch", "extension", "crack", "ridge"]) { (m.series[k] ??= []).push(m[k]); m[k] = Math.max(total[k], m[k]); }
     if (t > 1.5 && t < 2) for (let r = 1; r <= ROWS; r++) for (let c = 0; c <= COLS; c++)
-      m.restDrift = Math.max(m.restDrift, len(sub(pt(r, c), [restX(c), restY(r), ZMID + armorZ])));
+      m.restDrift = Math.max(m.restDrift, len(sub(pt(r, c), [restX(c), restY(r), ZMID + v.cwaz])));
     // While walking: how far the legs kick the hem back, and how deep a leg pokes through the cape.
     const [k0, k1] = opt.kickWindow ?? [2.5, 4];
     if (t > k0 && t < k1) {
@@ -253,14 +319,14 @@ function run(opt) {
           if (Math.abs(loc[0]) < 2 && loc[1] < 0 && loc[1] > -12 && loc[2] > -2) m.legClip = Math.max(m.legClip, 2 - (loc[2] - 0.5));
         }
       }
-      m.kick = Math.max(m.kick, ...[...Array(COLS + 1).keys()].map(c => pt(ROWS, c)[2] - ZMID - armorZ));
+      m.kick = Math.max(m.kick, ...[...Array(COLS + 1).keys()].map(c => pt(ROWS, c)[2] - ZMID - v.cwaz));
     }
     // Running: lift angle of the hem, sideways sway of the hem centre, hem width (crumpling).
     const [s0, s1] = opt.runWindow ?? [5, 6];
     if (t > s0 && t < s1) {
       const hem = [...Array(COLS + 1).keys()].map(c => pt(ROWS, c));
       const mid = [0, 1, 2].map(k => hem.reduce((n, p) => n + p[k], 0) / hem.length);
-      m.lift.push(Math.atan2(mid[2] - ZMID - armorZ, 24 - mid[1]) / D);
+      m.lift.push(Math.atan2(mid[2] - ZMID - v.cwaz, 24 - mid[1]) / D);
       // Ripple: how far mid-cape row 3 moves in and out over the run (0 = a rigid board).
       const row = [...Array(COLS + 1).keys()].map(c => pt(3, c)[2]), z3 = row.reduce((a, b) => a + b) / row.length;
       m.rippleMin = Math.min(m.rippleMin ?? z3, z3); m.rippleMax = Math.max(m.rippleMax ?? z3, z3);
@@ -282,6 +348,7 @@ const legsOnly = () => ({ speed: 0, swing: 4.3, yaw: 0, sneak: false, jump: 0, t
 const cases = [
   ["60fps", { fps: 60 }], ["30fps", { fps: 30 }], ["144fps", { fps: 144 }],
   ["60fps chestplate", { fps: 60, armorZ: 1 }], ["sprint 20s", { fps: 60, seconds: 20, scenario: sprintOnly, runWindow: [3, 20] }],
+  ["chestplate zero locator", { fps: 60, armorZ: 0, chestplate: true, inspect: v => assert.equal(v.cwaz, 1.5, 'equipment enables armour clearance with a zero locator') }],
   ["legs swing in place", { fps: 60, seconds: 6, scenario: legsOnly, kickWindow: [1, 6] }],
 ];
 // Same wind direction formula as cloth.mjs wind(): find a level time whose wind blows
@@ -405,6 +472,50 @@ function freshTest() {
   } catch (e) { return e.message; }
 }
 
+// Dressing-room previews have geometry but no actor. A positive locator does
+// not grant access to equipment/world queries. Also cover HUD paperdolls that
+// are excluded by their variable rather than query.is_in_ui.
+function uiContextTest() {
+  try {
+    for (const armorZ of [0, 1]) {
+      const s = { ui: 0, noEntity: false, time: 0, dt: 1 / 60, alpha: 0, pos: [0, 64, 0], yaw: 0, armorZ, chestplate: true,
+        bones: { body: { t: { x: 0, y: 24, z: 0 }, r: { x: 0, y: 0, z: 0 } },
+          rightleg: { t: { x: -1.9, y: 12, z: 0 }, r: { x: 0, y: 0, z: 0 } },
+          leftleg: { t: { x: 1.9, y: 12, z: 0 }, r: { x: 0, y: 0, z: 0 } } } };
+      const safe = new Set(['is_in_ui', 'get_root_locator_offset', 'cape_flap_amount']);
+      const q = new Proxy(query(s), { get(target, name) {
+        if (s.noEntity && !safe.has(name)) return () => { throw new Error(`UI queried ${name} without entity context`); };
+        return target[name];
+      } });
+      const preview = (v, paperdoll) => {
+        s.ui = +!paperdoll; s.noEntity = true; v.is_paperdoll = +paperdoll;
+        prog(v, q, MATH);
+        const cells = evalChannels(v, q);
+        assert.equal(v.cwon, 0);
+        assert.equal(v.cwaz, armorZ, 'preview keeps its own model locator offset');
+        assert.ok(Object.values(cells).every(cell => Object.values(cell).every(Number.isFinite)));
+        s.ui = 0; s.noEntity = false; v.is_paperdoll = 0;
+      };
+      for (const paperdoll of [false, true]) preview(strict({}), paperdoll);
+      const v = strict({ is_paperdoll: 0 });
+      for (let f = 0; f < 20; f++) { s.time = f / 60; prog(v, q, MATH); evalChannels(v, q); }
+      assert.equal(v.cwon, 1);
+      assert.equal(v.cwaz, 1.5, 'world chestplate clearance is retained');
+      for (const paperdoll of [false, true]) {
+        const before = { ...v }, worldTime = s.time;
+        s.time = 0; preview(v, paperdoll);
+        assert.deepEqual({ ...v, cwaz: before.cwaz, cwon: before.cwon }, before, 'preview preserves running simulation');
+        s.time = worldTime; prog(v, q, MATH); evalChannels(v, q);
+        assert.deepEqual({ ...v }, before, 'same-frame world pass restores its armour offset and output');
+      }
+      s.armorZ = 0; s.chestplate = false; s.time += 1 / 60;
+      prog(v, q, MATH);
+      assert.equal(v.cwaz, 0, 'removing chestplate clears the world offset');
+    }
+    return 'ok';
+  } catch (e) { return e.message; }
+}
+
 // A cosmetic reload may retain entity variables while restarting its clock and
 // rebuilding queryable geometry. The mock deliberately has no bones for 0.09 s.
 // This checks that scenario, not whether every Bedrock reload resets life_time.
@@ -456,9 +567,12 @@ const rawUpdate=toMolang(program())+'return 0;', exportedUpdate=compactNames([ra
 console.log(`anim_time_update ${exportedUpdate.length} chars (limit 61500)`);
 check('expression fits limit',exportedUpdate.length,exportedUpdate.length<=61500);
 check("fresh instance / UI only", freshTest(), freshTest() === "ok");
+const uiContext = uiContextTest();
+check('UI without entity context', uiContext, uiContext === 'ok');
 const reloaded = reloadTest();
 check("geometry reload warmup", reloaded, reloaded === "ok");
 check("affine fit error px", affineTest().toExponential(2), affineTest() < 1e-4);
+check('shared display mesh / burnt edge', displayMeshTest(), true);
 for (const [name, opt] of cases) {
   const m = run(opt), lift = m.lift.length ? m.lift.reduce((a, b) => a + b) / m.lift.length : 0;
   console.log(name);
@@ -471,6 +585,9 @@ for (const [name, opt] of cases) {
   console.log(`  info unfitted edge mismatch px ${fmt(p99("seam"))} / ${fmt(m.seam)}`);
   // Keep any sampled opening below one tenth of a texture pixel, including abrupt pose changes.
   check("uncovered seam px p99/max",`${fmt(p99("crack"))} / ${fmt(m.crack)}`,m.crack<0.1);
+  console.log(`  info surface step px p99/max ${fmt(p99('ridge'))} / ${fmt(m.ridge)}`);
+  check('display vertex offset px',fmt(m.meshOffset),m.meshOffset<=MESH_LIMIT+0.0001);
+  console.log(`  info max surface / physics deviation px ${fmt(m.physicsFit)}`);
   check("link extension px p99",fmt(p99("extension")),p99("extension")<0.5);
   const open = m.series.seam.filter(x => x > 2 * OVERLAP).length / m.series.seam.length;
   console.log(`  info frames with a crack wider than the ${2 * OVERLAP}px overlap: ${(open * 100).toFixed(2)}%`);

@@ -24,7 +24,7 @@ function measure({ fps, speed = 0, roof = false, water, rain = false, viewer = f
     const wet = y => water !== undefined && y < water;
     let q0 = 0;
     const q = { life_time: () => t, delta_time: () => 1 / fps, frame_alpha: () => t * 20 - now, position: k => cur[k] + (k === 1 ? 1.62 : 0),
-      body_y_rotation: () => 0, bone_orientation_trs: n => bones[n], get_root_locator_offset: () => 0,
+      body_y_rotation: () => 0, is_riding: () => 0, bone_orientation_trs: n => bones[n], get_root_locator_offset: () => 0, has_armor_slot: () => 0,
       has_cape: () => 1, is_in_ui: () => 0, is_spectator: () => 0, is_item_name_any: () => 0, is_on_ground: () => 1, is_on_fire: () => 0,
       time_stamp: () => 5000 + now, is_in_water: () => +wet(64), is_in_contact_with_water: () => +wet(63.9), is_in_lava: () => 0,
       is_in_water_or_rain: () => +(wet(64) || (rain && !roof)), entity_biome_has_any_tags: () => 0, time_of_day: () => 0.25,
