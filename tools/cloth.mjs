@@ -233,7 +233,7 @@ function env() {
   ];
 }
 
-// World wind from the level clock, so every client sees the same direction. Per tick:
+// World wind from the level clock gives nearby players a shared ambient direction.
 // Cold biomes always use the rain strength, without relying on snow counting as rain.
 // Other biomes use the rain query. Both share the same gradual strength transition;
 // then the blocks around the player shape it: a wall upwind shelters, walls on both sides
@@ -247,24 +247,40 @@ function wind() {
       set("v.cwrn", `math.clamp(v.cwrn+(((q.entity_biome_has_any_tags('cold','frozen')||q.is_in_water_or_rain)&&!q.is_in_water)?0.05:-0.003),0,1)`),
       set("t.ws", `${num(WIND)}*(0.9+0.5*${sin("t.ts*0.07")}+math.max(${sin("t.ts*1.9")}*${sin("t.ts*0.67")},0)*(0.8+1.6*v.cwrn))` +
         `*(1+${num(WIND_RAIN - 1)}*v.cwrn)`),
-      set("t.ux", cos("t.wa")), set("t.uz", sin("t.wa")),
-      // Sea and land breezes: by water the wind turns round between day and night and drops
-      // at dawn and dusk; deserts blow hardest in the afternoon, other land a little by day.
+      // Smooth the biome weights using elapsed sampling time, not the render-frame dt.
+      // A&S uses this exponential response for cape motion. Resets start in the current
+      // environment; crossing a biome boundary blends over the following seconds.
+      set("t.coast", "q.entity_biome_has_any_tags('ocean','beach','river')"),
+      set("t.arid", "!t.coast&&q.entity_biome_has_any_tags('desert','mesa')"),
+      set("t.envblend", "t.sr?1:1-math.exp(-2*math.clamp(q.life_time-v.cwwind_time,0,0.25))"),
+      set("v.cwwind_time", "q.life_time"),
+      set("v.cwcoast", "math.lerp(v.cwcoast,t.coast,t.envblend)"),
+      set("v.cwarid", "math.lerp(v.cwarid,t.arid,t.envblend)"),
+      // Retain background/gust wind at dawn and dusk. The coastal component changes
+      // sign across the day, perpendicular to the background so it cannot cancel it.
+      // This is a biome/daylight effect, not a sampled shoreline normal.
       set("t.dn", "math.sin((q.time_of_day-0.25)*360)"),
-      when("q.entity_biome_has_any_tags('ocean','beach','river')",
-        [set("t.ux", "t.ux*t.dn"), set("t.uz", "t.uz*t.dn"), set("t.ws", "t.ws*(0.4+0.8*math.abs(t.dn))")],
-        set("t.ws", "t.ws*(1+(q.entity_biome_has_any_tags('desert','mesa')?0.6:0.25)*t.dn)")),
+      set("t.background", "math.lerp(1+(0.25+0.35*v.cwarid)*t.dn,0.6,v.cwcoast)"),
+      set("t.breeze", "0.9*v.cwcoast*t.dn"),
+      set("t.wlen", "math.sqrt(t.background*t.background+t.breeze*t.breeze)"),
+      set("t.wx", cos("t.wa")), set("t.wz", sin("t.wa")),
+      set("t.ux", "(t.wx*t.background-t.wz*t.breeze)/t.wlen"),
+      set("t.uz", "(t.wz*t.background+t.wx*t.breeze)/t.wlen"),
+      set("t.ws", "t.ws*t.wlen"),
       // Shelter: a wall on the side the wind comes from (wind toward -x comes from +x).
       set("t.sh", "1-0.7*math.max(v.cwj0*math.max(-t.ux,0)+v.cwj2*math.max(t.ux,0),v.cwj1*math.max(-t.uz,0)+v.cwj3*math.max(t.uz,0))"),
       set("t.cx", "v.cwj1&&v.cwj3&&!(v.cwj0&&v.cwj2)"), set("t.cz", "v.cwj0&&v.cwj2&&!(v.cwj1&&v.cwj3)"),
-      when("t.cx||t.cz", [set("t.ux", "t.cx?(t.ux<0?-1:1):0"), set("t.uz", "t.cz?(t.uz<0?-1:1):0"), set("t.sh", 1.7)],
+      // Project onto the passage instead of normalising a tiny component to full wind.
+      when("t.cx||t.cz", [set("t.ux", "t.cx?t.ux:0"), set("t.uz", "t.cz?t.uz:0"), set("t.sh", 1.7)],
         when("v.cwj0&&v.cwj1&&v.cwj2&&v.cwj3", set("t.sh", 0.1))),
       set("t.ws", `t.ws*t.sh*(v.cwce?(t.cx||t.cz?0.6:0.1):1)*(1-v.cwwe)*math.clamp(1+(q.position(1)-64)/128,0.6,1.8)`),
-      set("t.ws", `t.ws>${num(WIND_CALM)}?t.ws:0`),
+      // Apply the calm threshold to the resulting speed, including corridor projection.
+      set("t.ws", `t.ws*t.ws*(t.ux*t.ux+t.uz*t.uz)>${num(WIND_CALM * WIND_CALM)}?t.ws:0`),
       set("v.cwux", "t.ux*t.ws"), set("v.cwuz", "t.uz*t.ws"),
     ]),
     // Smooth the stepped tick values; airspeed drives the flutter.
-    ["x", "z"].map(a => set("v.cwn" + a, `math.lerp(v.cwn${a},v.cwu${a},math.clamp(q.delta_time*2,0,1))`)),
+    set("t.windblend", "1-math.exp(-2*q.delta_time)"),
+    ["x", "z"].map(a => set("v.cwn" + a, `math.lerp(v.cwn${a},v.cwu${a},t.windblend)`)),
     // In a fluid the air flutter gives way to a fixed slight sway standing in for currents
     // (buoyancy alone cannot tip a cape hanging straight down).
     set("v.cwsp", `v.cwwe?1.5:math.min(math.sqrt(math.pow(v.cwvx-v.cwnx,2)+math.pow(v.cwvz-v.cwnz,2))+v.cwht*${HEAT_FLUTTER},${AIR_MAX})`),
@@ -366,8 +382,8 @@ const upperPose = UPPER.flatMap((_,i)=>[...AX,...[0,1,2].flatMap(k=>[0,1,2].map(
 const wake = () => [...pinnedIds.flatMap(c => AX.map(a => `math.abs(${P(c, a)}-${AN(c, a)})`)),
   ...upperPose.map(k=>`math.abs(t.${k}-v.cw${k})`),
   `math.abs(${legSig[0]}-v.cwrs)`, `math.abs(${legSig[1]}-v.cwls)`, "math.abs(v.cwsg-v.cwss)",
-  // Moisture changes the air forces, but drying in still air need not wake the grid.
-  "math.abs(v.cwwet-v.cwwets)*v.cwsp*(1-v.cwwe)",
+  // Only water-soaked fabric changes air forces. Rain tint never wakes the grid.
+  "math.abs(v.cwwet_water-v.cwwets)*v.cwsp*(1-v.cwwe)",
   "math.abs(v.cwnx-v.cwsx)", "math.abs(v.cwnz-v.cwsz)"].join("+") + `>${num(WAKE_EPS)}||v.cp_platform!=v.cq_platform||t.vn||v.cwht>0||v.cwchange>0.001||(v.cwbt>1&&v.cwbr>1.25&&v.cwbr<1.55)`;
 
 function step() {
@@ -375,14 +391,14 @@ function step() {
     // Velocity rescale for a changed step length; 0 right after a reset (v.cwh = 0).
     set("t.k", "v.cwh>0?math.clamp(t.h/v.cwh,0.5,2):0"), set("v.cwh", "t.h"),
     hemProbe.map(i => AX.map(a => set("t.w" + key(i) + a, P(i, a)))),
-    // Wet fabric catches less air and settles faster. Fluid drag/buoyancy retain
+    // Water-soaked fabric catches less air and settles faster. Fluid drag/buoyancy retain
     // their existing response; only the cape outside water/lava gets this damping.
-    set("t.moistResponse", "1-.9*v.cwwet*(1-v.cwwe)"),
+    set("t.moistResponse", "1-.9*v.cwwet_water*(1-v.cwwe)"),
     set("t.moistAir", `${num(AIR)}*t.moistResponse`),
     set("t.dm", `math.exp(-${num(DRAG)}*t.moistResponse*t.h)`), set("t.gh", `${pixels(16)}*t.h*t.h`),
     // Internal wet damping is relative to the wearer. Damping absolute world
     // velocity would act as extra air drag and lift the wet cape MORE when running.
-    set('t.moistDamp','math.exp(-8*v.cwwet*(1-v.cwwe)*t.h)'),
+    set('t.moistDamp','math.exp(-8*v.cwwet_water*(1-v.cwwe)*t.h)'),
     AX.map(a=>set('t.moistCarry'+a,`(1-t.moistDamp)*v.cwv${a}*${pixels()}*t.h`)),
     // One gentle outward pulse for shedding embers, applied to the shared grid.
     set("t.puff", ACTIONS ? 0 : "v.cwbt>1?math.sin(math.clamp((v.cwbr-1.25)/0.3,0,1)*180):0"),
@@ -439,7 +455,7 @@ function step() {
     set("v.cwqt", `t.mv<${num(SLEEP_EPS)}?v.cwqt+1:0`),
     set("v.cwrs", legSig[0]), set("v.cwls", legSig[1]),
     upperPose.map(k=>set('v.cw'+k,'t.'+k)),
-    set("v.cwss", "v.cwsg"), set("v.cwwets", "v.cwwet"),
+    set("v.cwss", "v.cwsg"), set("v.cwwets", "v.cwwet_water"),
     set("v.cq_platform", "v.cp_platform"), set("v.cwsx", "v.cwnx"), set("v.cwsz", "v.cwnz"),
   ];
 }
@@ -594,9 +610,16 @@ export const program = () => cacheConstants(flat(
   when("!(v.cwin??0)", [Object.entries(initDefaults()).map(([n, x]) => set("v." + n, n.startsWith('cwwet') ? `(v.${n}??${x})` : x)), set("v.cwin", 1)]),
   body()), ["0.001", "17.06667", "0.0001"]);
 
-// Actual water/rain exposure, independent of the cold-biome wind multiplier.
-// Run once per world frame (also while asleep): ~10 s to dry, ~3.3 s in heat.
-export const wetClock = () => set("v.cwwet", "math.clamp((v.cwwet??0)+(q.is_in_water?4:q.is_in_water_or_rain?.7:-(q.entity_biome_has_any_tags('desert','nether')?.3:.1))*math.clamp(q.delta_time,0,.1),0,1)");
+// Rain/water tint and water-only physical wetness share one frame clock.
+// Rain never adds weight or prolongs the water-soaked response after leaving water.
+// Both dry over ~10 s, or ~3.3 s in hot biomes, including while asleep/hidden.
+export const wetClock = () => [
+  set('t.wet_dt', 'math.clamp(q.delta_time,0,.1)'),
+  set('t.wet_water', 'q.is_in_water'),
+  set('t.wet_dry', "q.entity_biome_has_any_tags('desert','nether')?.3:.1"),
+  set('v.cwwet', 'math.clamp((v.cwwet??0)+(t.wet_water?4:q.is_in_water_or_rain?.7:-t.wet_dry)*t.wet_dt,0,1)'),
+  set('v.cwwet_water', 'math.clamp((v.cwwet_water??0)+(t.wet_water?4:-t.wet_dry)*t.wet_dt,0,1)'),
+];
 // The native root controller omits the cape animation in first person. Its cape
 // render controller can still update this scalar clock, without reading bones.
 // Both entries use the same stamp; render order and duplicate passes do not matter.
@@ -744,4 +767,4 @@ export function renderController() {
     overlay_color:{r:0,g:0,b:0,a:toMolang([wetUpdate()])+`return ${wetTint};`}
   }}};
 }
-export const sections = () => ({ upper: upperFrames(), upperContacts: upperContacts(), weights: smoothWeights(), origin: origin(), frame: frame(), reset: reset(), step: step(), cell: cell(1, 1) });
+export const sections = () => ({ wind: wind(), upper: upperFrames(), upperContacts: upperContacts(), weights: smoothWeights(), origin: origin(), frame: frame(), reset: reset(), step: step(), cell: cell(1, 1) });

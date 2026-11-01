@@ -620,7 +620,7 @@ console.log("environment");
 check("outdoor wind > 0.3 b/s", fmt(env["outdoor stand"].wind), env["outdoor stand"].wind > 0.3);
 check("outdoor stays awake", fmt(env["outdoor stand"].sleep), env["outdoor stand"].sleep < 0.1);
 check("rain wind / calm", fmt(env["rain stand"].wind / env["outdoor stand"].wind), env["rain stand"].wind > 1.5 * env["outdoor stand"].wind);
-check("wet cape hangs closer despite stronger rain wind", `${fmt(env["rain stand"].deflect)} < ${fmt(env["outdoor stand"].deflect)}`, env["rain stand"].deflect < env["outdoor stand"].deflect);
+check("rain wind moves cloth without wet-weight damping", `${fmt(env["rain stand"].deflect)} > ${fmt(env["outdoor stand"].deflect)}`, env["rain stand"].deflect > env["outdoor stand"].deflect);
 check("corridor wind / open", fmt(env["corridor stand"].wind / env["outdoor stand"].wind), env["corridor stand"].wind > 1.4 * env["outdoor stand"].wind);
 check("wall upwind shelters", fmt(env["sheltered stand"].wind / env["outdoor stand"].wind), env["sheltered stand"].wind < 0.5 * env["outdoor stand"].wind);
 check("roofed room is calm", fmt(env["roofed stand"].wind), env["roofed stand"].wind === 0 && env["roofed stand"].sleep > 0.5);

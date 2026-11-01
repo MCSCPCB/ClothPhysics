@@ -57,7 +57,7 @@
     "r": 0,
     "g": 0,
     "b": 0,
-    "a": "(!q.is_in_ui&&!(v.is_paperdoll??0))?{(q.life_time!=(v.al??-1))?{v.pf=math.clamp((v.pf??0)+(q.is_in_water?4:q.is_in_water_or_rain?.7:-(q.entity_biome_has_any_tags('desert','nether')?.3:.1))*math.clamp(q.delta_time,0,.1),0,1);v.al=q.life_time;};};return !q.is_in_ui&&!(v.is_paperdoll??0)?(v.pf??0)*.45:0;"
+    "a": "(!q.is_in_ui&&!(v.is_paperdoll??0))?{(q.life_time!=(v.cl??-1))?{t.a=math.clamp(q.delta_time,0,.1);t.b=q.is_in_water;t.c=q.entity_biome_has_any_tags('desert','nether')?.3:.1;v.bl=math.clamp((v.bl??0)+(t.b?4:q.is_in_water_or_rain?.7:-t.c)*t.a,0,1);v.pf=math.clamp((v.pf??0)+(t.b?4:-t.c)*t.a,0,1);v.cl=q.life_time;};};return !q.is_in_ui&&!(v.is_paperdoll??0)?(v.bl??0)*.45:0;"
    }
   }
  }

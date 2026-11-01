@@ -56,7 +56,7 @@ const dry=playerFixture(),wet=playerFixture();
 for(const f of [dry,wet]){f.s.roof=false;f.q.time_stamp=()=>5000+Math.floor(f.s.time*20);}
 let dryLift=0,wetLift=0;
 for(let i=0;i<300;i++){
- for(const[f,moist]of [[dry,0],[wet,1]]){f.v.cwwet=moist;f.tick();}
+ for(const[f,moist]of [[dry,0],[wet,1]]){f.v.cwwet_water=moist;f.tick();}
  if(i>=180){dryLift+=dry.v['cp'+pid(ROWS,2).toString(36)+'y'];wetLift+=wet.v['cp'+pid(ROWS,2).toString(36)+'y'];}
 }
 console.log({dryHemY:dryLift/120,wetHemY:wetLift/120});
@@ -67,7 +67,7 @@ const sprint=[];
 for(const moist of [0,1]){
  const f=playerFixture();f.s.roof=false;const start=f.s.time;
  f.q.position=k=>[.5,65.62,.5+(f.s.time-start)*5.6][k];let y=0,z=0;
- for(let i=0;i<360;i++){f.v.cwwet=moist;f.tick();if(i>239){y+=f.v['cp'+pid(ROWS,2).toString(36)+'y'];z+=f.v.cwkz-f.v['cp'+pid(ROWS,2).toString(36)+'z'];}}
+ for(let i=0;i<360;i++){f.v.cwwet_water=moist;f.tick();if(i>239){y+=f.v['cp'+pid(ROWS,2).toString(36)+'y'];z+=f.v.cwkz-f.v['cp'+pid(ROWS,2).toString(36)+'z'];}}
  sprint.push({hemY:y/120,hemZ:z/120});
 }
 assert.ok(sprint[1].hemY<sprint[0].hemY-3,'wet running cloth hangs lower');

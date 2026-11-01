@@ -50,7 +50,7 @@ for(const name of profile.externalNames)assert.ok(!packed.map.has(name)||packed.
 for(const fps of [30,60,144]){
  const f=playerFixture(fps),v=strict({}),short=strict({});f.q.is_on_fire=()=>+(f.s.time>102&&f.s.time<104);f.q.body_y_rotation=()=>f.s.time*17;
  for(let frame=0;frame<fps*7;frame++){
-  f.s.time+=f.s.dt;f.s.rain=frame>fps&&frame<fps*2;f.s.roof=false;
+  f.s.time+=f.s.dt;f.s.rain=frame>fps&&frame<fps*2;f.s.water=frame>=fps*4&&frame<fps*5;f.s.roof=false;
   v.is_first_person=short.is_first_person=+(frame<fps/2);
   // Render can precede animation. Its wetness timestamp must survive initialization.
   const color=tint(v,f.q,MATH);compactTint(short,f.q,MATH);assert.equal(short.export_result,color);
