@@ -1,7 +1,25 @@
-## 致谢 / Credits
+# 披风物理
 
-动画 部分代码参考并改编自 T1M0THY 的 **Cape Physics Resource Pack** 纹理包。  
-Parts of the Animation code were adapted from T1M0THY’s **Cape Physics Resource Pack** texture pack.
+披风物理 为原版披风添加物理驱动的布料效果。
 
-**参考项目 / Referenced project:**  
-[T1M0THY - Cape Physics Resource Pack](https://www.curseforge.com/minecraft-bedrock/texture-packs/cape-physics-resource-pack)
+该项目完全基于资源包实现，无需任何行为包。支持所有原版披风。
+
+## 特性
+
+- 原版披风的物理布料模拟
+- 纯资源包，无需依赖行为包
+
+在全局资源包中启用以获得更好的体验。
+
+# Cape Physics
+
+Cape Physics adds physics-driven cloth simulation to vanilla capes.
+
+It runs entirely as a resource pack and requires no behavior packs. Supports all vanilla capes.
+
+## Features
+
+- Physics-based cloth simulation for vanilla capes
+- Resource pack only, with no behavior pack required
+
+Enable in Global Resource Pack for a better experience.
