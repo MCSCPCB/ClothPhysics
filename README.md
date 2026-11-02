@@ -8,6 +8,7 @@
 
 - 原版披风的物理布料模拟
 - 纯资源包，无需依赖行为包
+- 可选的 Actions & Stuff 1.13 兼容子包
 
 在全局资源包中启用以获得更好的体验。
 
@@ -21,5 +22,6 @@ It runs entirely as a resource pack and requires no behavior packs. Supports all
 
 - Physics-based cloth simulation for vanilla capes
 - Resource pack only, with no behavior pack required
+- Optional Actions & Stuff 1.13 compatibility subpack
 
 Enable in Global Resource Pack for a better experience.
